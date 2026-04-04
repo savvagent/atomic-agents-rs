@@ -1,0 +1,21 @@
+[package]
+name = "atomic-assembler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TUI tool for browsing and downloading atomic-forge tools"
+
+[[bin]]
+name = "atomic-assembler"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+git2 = "0.20"
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+open = "5"

@@ -1,0 +1,37 @@
+[package]
+name = "atomic-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A lightweight, modular framework for building AI agent pipelines with structured LLM outputs"
+
+[dependencies]
+atomic-agents-macros = { path = "../atomic-agents-macros" }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tokio-stream.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+indexmap.workspace = true
+tiktoken-rs.workspace = true
+pin-project-lite.workspace = true
+bytes = "1"
+eventsource-stream = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
+atomic-forge = { path = "../atomic-forge" }
+
+[features]
+default = ["openai"]
+openai = []
+anthropic = []
+google = []
+mcp = []

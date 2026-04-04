@@ -1,0 +1,23 @@
+[package]
+name = "atomic-forge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Collection of reusable tools for atomic-agents"
+
+[dependencies]
+atomic-agents = { path = "../atomic-agents" }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+evalexpr = "12"
+scraper = "0.22"
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
