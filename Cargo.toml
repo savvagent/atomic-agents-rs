@@ -5,6 +5,7 @@ members = [
     "atomic-agents-macros",
     "atomic-assembler",
     "atomic-forge",
+    "atomic-studio-runner",
 ]
 
 [workspace.package]
@@ -12,6 +13,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/BrainBlend-AI/atomic-agents-rs"
+keywords = ["ai", "agents", "llm", "pipeline", "structured-output"]
+categories = ["science"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

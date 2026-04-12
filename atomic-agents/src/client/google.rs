@@ -2,7 +2,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
 use reqwest::Client;
 
 use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};

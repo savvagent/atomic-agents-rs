@@ -1,0 +1,11 @@
+{
+  "name": "Atomic Studio",
+  "short_name": "AtomicStudio",
+  "description": "Visual pipeline editor for atomic-agents",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": []
+}

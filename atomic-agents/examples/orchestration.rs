@@ -3,7 +3,7 @@
 //! Usage: OPENAI_API_KEY=sk-... cargo run --example orchestration
 
 use atomic_agents::prelude::*;
-use atomic_forge::calculator::{CalculatorInput, CalculatorOutput, CalculatorTool};
+use atomic_forge::calculator::{CalculatorInput, CalculatorTool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

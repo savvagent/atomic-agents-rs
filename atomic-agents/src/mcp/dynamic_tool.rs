@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::definition_service::{McpDefinitionService, McpToolDefinition, McpTransportType};
 
 /// A dynamically-created tool from an MCP server.

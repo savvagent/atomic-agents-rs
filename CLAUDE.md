@@ -17,18 +17,45 @@ cargo test test_agent_run_async          # Run a single test by name
 cargo build -p atomic-agents --features "openai,anthropic,google,mcp"  # All features
 cargo run -p atomic-assembler            # Run the TUI tool browser
 cargo run --example basic_chatbot -p atomic-agents --features openai   # Run an example
+cargo run -p atomic-studio-runner -- serve --addr 127.0.0.1:8787 \
+  --static-dir atomic-studio/build       # Serve the studio PWA + JSON API
 ```
 
 Feature flags on `atomic-agents`: `openai` (default), `anthropic`, `google`, `mcp`.
 
+### atomic-studio (PWA)
+
+The studio is a SvelteKit + Svelte Flow PWA living in `atomic-studio/`. It is a
+local-first installable web app — pipelines persist to IndexedDB, can be
+imported/exported as JSON, and execute against `atomic-studio-runner`'s HTTP API.
+The PWA uses SvelteKit's built-in service worker (`src/service-worker.ts`) — no
+third-party PWA plugin.
+
+```bash
+cd atomic-studio && pnpm install && pnpm dev   # Dev server (proxies /api → localhost:8787)
+cd atomic-studio && pnpm build                  # Build static assets to atomic-studio/build/
+```
+
+The runner's `serve` subcommand exposes:
+
+- `POST /api/validate` — JSON pipeline → `{ valid, errors, warnings }`
+- `POST /api/runs`     — `{ pipeline, input }` → newline-delimited JSON stream of
+  `ExecutionEvent`s over chunked HTTP transfer (consumed via fetch ReadableStream).
+- Static fallback serves `--static-dir` (typically `atomic-studio/build`) so the
+  PWA and API live behind a single origin.
+
+API keys for agent execution come from environment variables: `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` (or `GEMINI_API_KEY`).
+
 ## Workspace Structure
 
-Four crates in a Cargo workspace:
+Five crates in a Cargo workspace:
 
 - **`atomic-agents`** — Core framework: agent, LLM clients, schemas, chat history, streaming, hooks, MCP integration
 - **`atomic-agents-macros`** — Proc macro crate providing `#[derive(IOSchema)]`
 - **`atomic-forge`** — Collection of reusable tools (calculator, web search, scraper, YouTube transcripts)
 - **`atomic-assembler`** — TUI application (ratatui) for browsing and downloading atomic-forge tools
+- **`atomic-studio-runner`** — Pipeline interpreter + HTTP server backing the atomic-studio PWA
 
 ## Architecture
 

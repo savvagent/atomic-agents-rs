@@ -20,4 +20,4 @@ pub use definition_service::{
     McpDefinitionService, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
     McpTransportType,
 };
-pub use dynamic_tool::McpTool;
+pub use dynamic_tool::{McpTool, create_mcp_tools};

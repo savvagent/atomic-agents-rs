@@ -1,0 +1,156 @@
+@import 'tailwindcss';
+@import '@xyflow/svelte/dist/style.css';
+
+@theme {
+  --color-panel: #16213e;
+  --color-accent: #0f3460;
+  --color-highlight: #e94560;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Form input helper */
+.input-field {
+  @apply w-full px-2 py-1.5 bg-gray-800 border border-gray-600 rounded text-gray-200 text-xs outline-none;
+}
+.input-field:focus {
+  @apply border-blue-500 ring-1 ring-blue-500/30;
+}
+select.input-field {
+  @apply appearance-none cursor-pointer;
+}
+
+/* ConfigPanel label */
+.cfg-label {
+  @apply block text-xs font-semibold text-gray-400 mb-1;
+}
+
+/* Toolbar buttons */
+.tb-btn {
+  @apply px-3 py-1 text-xs rounded text-gray-200 transition-colors bg-accent;
+}
+.tb-btn:hover:not(:disabled) {
+  @apply bg-blue-700;
+}
+.tb-btn:disabled {
+  @apply opacity-50 cursor-not-allowed bg-gray-700;
+}
+
+/* Svelte Flow dark theme overrides */
+.svelte-flow {
+  background-color: #1a1a2e;
+}
+
+.svelte-flow__minimap {
+  background-color: #16213e !important;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+}
+
+.svelte-flow__controls {
+  background-color: #16213e !important;
+  border: 1px solid #0f3460;
+  border-radius: 8px;
+}
+
+.svelte-flow__controls-button {
+  background-color: #16213e !important;
+  border-color: #0f3460 !important;
+  fill: #e2e8f0 !important;
+}
+
+.svelte-flow__controls-button:hover {
+  background-color: #0f3460 !important;
+}
+
+.svelte-flow__edge-path {
+  stroke: #64748b;
+  stroke-width: 2;
+}
+
+.svelte-flow__connection-line {
+  stroke: #e94560;
+  stroke-width: 2;
+}
+
+/* Studio nodes */
+.studio-node {
+  border-radius: 8px;
+  border: 2px solid #334155;
+  background: #1e293b;
+  min-width: 180px;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+
+.studio-node:hover {
+  border-color: #64748b;
+}
+
+.studio-node.selected {
+  border-color: #e94560;
+  box-shadow: 0 0 16px rgba(233, 69, 96, 0.3);
+}
+
+.studio-node .node-header {
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 1px solid #334155;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.studio-node .node-body {
+  padding: 8px 12px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.svelte-flow__handle {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #475569;
+  background: #1e293b;
+}
+
+.svelte-flow__handle-left {
+  left: -6px;
+}
+.svelte-flow__handle-right {
+  right: -6px;
+}
+
+.svelte-flow__handle:hover {
+  background: #e94560;
+  border-color: #e94560;
+}
+
+.node-status-running {
+  border-color: #3b82f6 !important;
+  animation: pulse-border 1.5s ease-in-out infinite;
+}
+
+.node-status-completed {
+  border-color: #22c55e !important;
+}
+
+.node-status-failed {
+  border-color: #ef4444 !important;
+}
+
+@keyframes pulse-border {
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.6);
+  }
+}

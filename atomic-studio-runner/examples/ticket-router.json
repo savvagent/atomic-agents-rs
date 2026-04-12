@@ -1,0 +1,170 @@
+{
+  "schemas": {
+    "TicketInput": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "The customer support ticket message"
+        }
+      },
+      "required": ["message"]
+    },
+    "ClassifiedTicket": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "The ticket category (billing, technical, general)"
+        },
+        "urgency": {
+          "type": "string",
+          "description": "Urgency level: high, medium, or low"
+        },
+        "summary": {
+          "type": "string",
+          "description": "Brief summary of the issue"
+        }
+      },
+      "required": ["category", "urgency", "summary"]
+    },
+    "Response": {
+      "type": "object",
+      "properties": {
+        "reply": {
+          "type": "string",
+          "description": "The response message to send to the customer"
+        }
+      },
+      "required": ["reply"]
+    }
+  },
+  "nodes": [
+    {
+      "id": "input",
+      "type": "user_input",
+      "config": {
+        "schema_ref": "TicketInput"
+      },
+      "position": [0, 200]
+    },
+    {
+      "id": "classifier",
+      "type": "agent",
+      "config": {
+        "input_schema": "TicketInput",
+        "output_schema": "ClassifiedTicket",
+        "extraction_mode": "tools",
+        "system_prompt": {
+          "background": [
+            "You are a customer support ticket classifier.",
+            "Analyze the incoming ticket and determine its category and urgency."
+          ],
+          "steps": [
+            "Read the customer message carefully",
+            "Determine the category: billing, technical, or general",
+            "Assess urgency: high (service down, security), medium (degraded), low (question)",
+            "Write a brief summary"
+          ],
+          "output_instructions": []
+        },
+        "max_retries": 3,
+        "extra_params": {}
+      },
+      "position": [300, 200]
+    },
+    {
+      "id": "router",
+      "type": "router",
+      "config": {
+        "conditions": [
+          {
+            "name": "urgent",
+            "op": "equals",
+            "field": "urgency",
+            "value": "high"
+          },
+          {
+            "name": "normal",
+            "op": "equals",
+            "field": "urgency",
+            "value": "low"
+          }
+        ],
+        "default_route": "normal"
+      },
+      "position": [600, 200]
+    },
+    {
+      "id": "urgent_responder",
+      "type": "agent",
+      "config": {
+        "input_schema": "ClassifiedTicket",
+        "output_schema": "Response",
+        "extraction_mode": "tools",
+        "system_prompt": {
+          "background": [
+            "You handle urgent customer support tickets.",
+            "Be empathetic, acknowledge the urgency, and provide immediate next steps."
+          ],
+          "steps": [],
+          "output_instructions": []
+        },
+        "max_retries": 3,
+        "extra_params": {}
+      },
+      "position": [900, 100]
+    },
+    {
+      "id": "normal_responder",
+      "type": "agent",
+      "config": {
+        "input_schema": "ClassifiedTicket",
+        "output_schema": "Response",
+        "extraction_mode": "tools",
+        "system_prompt": {
+          "background": [
+            "You handle routine customer support tickets.",
+            "Be helpful and thorough. Provide clear answers or next steps."
+          ],
+          "steps": [],
+          "output_instructions": []
+        },
+        "max_retries": 3,
+        "extra_params": {}
+      },
+      "position": [900, 300]
+    },
+    {
+      "id": "merge",
+      "type": "merge",
+      "config": {
+        "strategy": "first_ready",
+        "output_schema": "Response"
+      },
+      "position": [1200, 200]
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "config": {
+        "schema_ref": "Response"
+      },
+      "position": [1500, 200]
+    }
+  ],
+  "edges": [
+    { "source": "input", "target": "classifier" },
+    { "source": "classifier", "target": "router" },
+    { "source": "router", "target": "urgent_responder", "handle": "urgent" },
+    { "source": "router", "target": "normal_responder", "handle": "normal" },
+    { "source": "urgent_responder", "target": "merge" },
+    { "source": "normal_responder", "target": "merge" },
+    { "source": "merge", "target": "output" }
+  ],
+  "settings": {
+    "default_provider": "openai",
+    "default_model": "gpt-4o",
+    "max_concurrent": 4
+  }
+}
