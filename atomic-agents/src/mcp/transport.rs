@@ -11,6 +11,7 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 
 use super::legacy_sse::LegacySseTransport;
+use super::redacting_http::RedactingHttpClient;
 use crate::error::{Error, Result};
 
 /// MCP transport protocol, used with endpoint strings
@@ -394,7 +395,10 @@ pub(crate) async fn connect_transport(
             if let Some(token) = bearer {
                 cfg = cfg.auth_header(token);
             }
-            let http = StreamableHttpClientTransport::from_config(cfg);
+            // rmcp's default client, wrapped so that no error (and so none of
+            // rmcp's own log lines) carries the endpoint URL.
+            let client = RedactingHttpClient::new().map_err(|e| fail(&e))?;
+            let http = StreamableHttpClientTransport::with_client(client, cfg);
             client_config().serve(http).await.map_err(|e| fail(&e))?
         }
         McpTransport::Sse { url, headers } => {

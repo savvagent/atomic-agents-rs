@@ -24,14 +24,13 @@
 - Orchestrator support: `orchestrator_schema`, `McpToolset`, `McpToolCall`, `McpOrchestratorOutput`, and `fetch_mcp_*` helpers.
 - `AgentConfig::with_output_schema` to override the output JSON Schema sent to the model.
 - Explicit `Error::Mcp` messages for unsupported `input_required` and task replies.
-- URL userinfo, query and fragment are redacted from MCP error text; header values are marked sensitive.
+- URL userinfo, query and fragment are redacted from MCP error text; header values are marked sensitive. The Streamable HTTP transport uses rmcp's default reqwest client (same-origin 307/308 redirects only, at most 10) wrapped so that HTTP client errors carry no URL, which also keeps endpoint secrets out of rmcp's own `tracing` output.
 - Legacy SSE hardening: same-origin POST endpoint, no redirects, 30 s connect budget, 16 MiB per-event cap.
 - The orchestrator schema does not require `serde_json/preserve_order`; `tool_name` is listed first in `required` only.
 - TLS for the Streamable HTTP transport uses native-tls (rmcp's `reqwest-native-tls`), the same backend as this crate's reqwest 0.12 default. The `mcp` feature pulls in no rustls, aws-lc-rs or aws-lc-sys, so it cannot change which rustls crypto provider a downstream build selects.
 
 ### Known limitations
 
-- `rmcp` logs some transport errors through `tracing` itself; those log lines are outside this crate's URL redaction, so keep credentials out of endpoint query strings when transport errors are logged.
 - MCP `input_required` (multi-round-trip) and task replies are reported as errors, not handled.
 
 ### Migration

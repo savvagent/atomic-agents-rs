@@ -62,6 +62,9 @@ fn scenarios() -> Vec<Scenario> {
         ("http_connect_error_redacts_query", || {
             http_connect_error_redacts_query().boxed()
         }),
+        ("http_transport_logs_redact_query", || {
+            http_transport_logs_redact_query().boxed()
+        }),
         ("closed_session_errors", || closed_session_errors().boxed()),
         ("tool_trait_over_http", || tool_trait_over_http().boxed()),
         ("tool_trait_over_stdio", || tool_trait_over_stdio().boxed()),
@@ -154,6 +157,7 @@ fn main() {
         println!("0 passed, 0 failed (0 matched filter {f:?})");
         std::process::exit(0);
     }
+    support::logs::install();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -379,6 +383,32 @@ async fn http_connect_error_redacts_query() {
     for leaked in ["secret123", "pw"] {
         assert!(!text.contains(leaked), "{leaked} leaked: {text}");
     }
+}
+
+/// rmcp logs transport errors through `tracing` itself; a reqwest error's
+/// Display carries the request URL, so those lines must not leak the query.
+async fn http_transport_logs_redact_query() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        l.local_addr().expect("addr").port()
+    };
+    let marker = support::logs::mark();
+    let url = format!("http://127.0.0.1:{port}/mcp?token=secret123");
+    McpClient::connect(McpTransport::streamable_http(url))
+        .await
+        .expect_err("nothing is listening");
+    // The worker logs its quit reason from its own task; give it a moment.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let logs = support::logs::since(marker);
+    // The failure must actually have been logged by rmcp, with the error.
+    assert!(
+        logs.contains("rmcp::transport") && logs.contains("Connection refused"),
+        "no rmcp transport error captured: {logs}"
+    );
+    assert!(
+        !logs.contains("secret123"),
+        "query leaked into logs: {logs}"
+    );
 }
 
 async fn closed_session_errors() {

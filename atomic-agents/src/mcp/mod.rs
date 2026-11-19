@@ -34,6 +34,7 @@ mod definitions;
 mod legacy_sse;
 mod orchestrator;
 mod prompt;
+mod redacting_http;
 mod resource;
 mod result;
 mod tool;
