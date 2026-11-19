@@ -15,19 +15,19 @@ atomic-agents-macros = { version = "0.2.1", path = "../atomic-agents-macros" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, optional = true }
 futures.workspace = true
 async-trait.workspace = true
-tokio-stream.workspace = true
-reqwest.workspace = true
+tokio-stream = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 thiserror.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 indexmap.workspace = true
-tiktoken-rs.workspace = true
+tiktoken-rs = { workspace = true, optional = true }
 pin-project-lite.workspace = true
-bytes = "1"
-eventsource-stream = "0.2"
+bytes = { version = "1", optional = true }
+eventsource-stream = { version = "0.2", optional = true }
 # `~3.11`: redacting_http.rs implements rmcp's StreamableHttpClient for the
 # same reqwest 0.13 as `reqwest_013`; a later rmcp may move reqwest versions.
 rmcp = { version = "~3.11", optional = true, default-features = false, features = [
@@ -58,10 +58,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["openai"]
-openai = []
-anthropic = []
-google = []
-mcp = ["dep:rmcp", "dep:shlex", "dep:url", "dep:http", "dep:reqwest_013", "tokio/time"]
+native = ["dep:tokio", "dep:reqwest", "dep:tiktoken-rs", "dep:bytes", "dep:eventsource-stream", "dep:tokio-stream"]
+guest = []
+openai = ["native"]
+anthropic = ["native"]
+google = ["native"]
+mcp = ["native", "dep:rmcp", "dep:shlex", "dep:url", "dep:http", "dep:reqwest_013", "tokio/time"]
 
 [[test]]
 name = "mcp_integration"

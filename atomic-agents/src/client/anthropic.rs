@@ -104,7 +104,20 @@ impl AnthropicClient {
                 })
                 .collect();
             body["tools"] = serde_json::json!(anthropic_tools);
-            body["tool_choice"] = serde_json::json!({"type": "any"});
+            // Current Claude models reject a forced tool_choice (`any`/`tool`)
+            // with a 400, so let the model choose and instruct it in the
+            // system prompt to answer through the tool.
+            body["tool_choice"] = serde_json::json!({"type": "auto"});
+            if let Some(first) = tools.first() {
+                if !system_text.is_empty() {
+                    system_text.push_str("\n\n");
+                }
+                system_text.push_str(&format!(
+                    "Respond by calling the `{}` tool.",
+                    first.function.name
+                ));
+                body["system"] = serde_json::json!(system_text);
+            }
         }
 
         // Merge extra parameters (skip max_tokens since we handled it)
@@ -156,53 +169,7 @@ impl LlmClient for AnthropicClient {
         let response_json: serde_json::Value =
             response.json().await.map_err(ClientError::Http)?;
 
-        // Extract content from Anthropic response
-        // Anthropic returns content as an array of content blocks
-        let content = if let Some(content_blocks) = response_json.get("content") {
-            let mut result = String::new();
-            if let Some(blocks) = content_blocks.as_array() {
-                for block in blocks {
-                    match block.get("type").and_then(|t| t.as_str()) {
-                        Some("tool_use") => {
-                            // Tool use block contains structured output
-                            if let Some(input) = block.get("input") {
-                                result = serde_json::to_string(input).unwrap_or_default();
-                            }
-                        }
-                        Some("text") => {
-                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                result = text.to_string();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            result
-        } else {
-            String::new()
-        };
-
-        let usage = response_json.get("usage").map(|u| Usage {
-            prompt_tokens: u
-                .get("input_tokens")
-                .and_then(|v| v.as_u64().map(|n| n as u32)),
-            completion_tokens: u
-                .get("output_tokens")
-                .and_then(|v| v.as_u64().map(|n| n as u32)),
-            total_tokens: None, // Anthropic doesn't return total
-        });
-
-        let finish_reason = response_json
-            .get("stop_reason")
-            .and_then(|f| f.as_str())
-            .map(String::from);
-
-        Ok(ChatResponse {
-            content,
-            finish_reason,
-            usage,
-        })
+        parse_response(&response_json)
     }
 
     async fn chat_completion_stream(
@@ -241,6 +208,61 @@ impl LlmClient for AnthropicClient {
     fn provider_name(&self) -> &str {
         "anthropic"
     }
+}
+
+/// Converts an Anthropic Messages API response body into a [`ChatResponse`].
+///
+/// The request no longer forces a tool call, so the model may answer with a
+/// plain `text` block instead of a `tool_use` block; both are accepted and the
+/// last recognised block wins.
+fn parse_response(json: &serde_json::Value) -> Result<ChatResponse, Error> {
+        // Extract content from Anthropic response
+        // Anthropic returns content as an array of content blocks
+        let content = if let Some(content_blocks) = json.get("content") {
+            let mut result = String::new();
+            if let Some(blocks) = content_blocks.as_array() {
+                for block in blocks {
+                    match block.get("type").and_then(|t| t.as_str()) {
+                        Some("tool_use") => {
+                            // Tool use block contains structured output
+                            if let Some(input) = block.get("input") {
+                                result = serde_json::to_string(input).unwrap_or_default();
+                            }
+                        }
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                result = text.to_string();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            result
+        } else {
+            String::new()
+        };
+
+        let usage = json.get("usage").map(|u| Usage {
+            prompt_tokens: u
+                .get("input_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
+            completion_tokens: u
+                .get("output_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
+            total_tokens: None, // Anthropic doesn't return total
+        });
+
+        let finish_reason = json
+            .get("stop_reason")
+            .and_then(|f| f.as_str())
+            .map(String::from);
+
+        Ok(ChatResponse {
+            content,
+            finish_reason,
+            usage,
+        })
 }
 
 /// Parses Anthropic's SSE stream format into ChatChunks.
@@ -368,5 +390,72 @@ fn parse_anthropic_sse(buffer: &mut String) -> Option<ChatChunk> {
                 // Skip other event types (message_start, content_block_start, etc.)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::types::{ChatMessage, FunctionDefinition, ToolDefinition};
+    use serde_json::json;
+
+    fn request(with_tool: bool) -> ChatRequest {
+        let mut req = ChatRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: json!("You are helpful."),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: json!("Hi"),
+                },
+            ],
+        );
+        if with_tool {
+            req.tools = Some(vec![ToolDefinition {
+                tool_type: "function".into(),
+                function: FunctionDefinition {
+                    name: "answer".into(),
+                    description: None,
+                    parameters: json!({"type": "object"}),
+                    strict: None,
+                },
+            }]);
+        }
+        req
+    }
+
+    #[test]
+    fn tool_request_uses_auto_tool_choice_and_names_the_tool() {
+        let body = AnthropicClient::new("k").build_request_body(&request(true));
+        assert_eq!(body["tool_choice"], json!({"type": "auto"}));
+        let system = body["system"].as_str().unwrap();
+        assert!(system.starts_with("You are helpful."));
+        assert!(system.ends_with("Respond by calling the `answer` tool."));
+    }
+
+    #[test]
+    fn request_without_tools_has_no_tool_choice_and_unchanged_system() {
+        let body = AnthropicClient::new("k").build_request_body(&request(false));
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["system"], json!("You are helpful."));
+    }
+
+    #[test]
+    fn parses_text_only_response() {
+        let r = parse_response(&json!({"content": [{"type": "text", "text": "{\"a\":1}"}]}))
+            .unwrap();
+        assert_eq!(r.content, "{\"a\":1}");
+    }
+
+    #[test]
+    fn parses_tool_use_response() {
+        let r = parse_response(&json!({"content": [
+            {"type": "tool_use", "id": "t", "name": "answer", "input": {"a": 1}}
+        ]}))
+        .unwrap();
+        assert_eq!(r.content, "{\"a\":1}");
     }
 }

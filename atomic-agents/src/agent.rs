@@ -249,10 +249,20 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
     ///
     /// Blocks the current thread until the response is ready.
     /// Must be called from within a tokio runtime.
+    #[cfg(feature = "native")]
     pub fn run(&self, user_input: Option<I>) -> Result<O> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.run_async(user_input))
         })
+    }
+
+    /// Synchronous single-turn execution (convenience wrapper).
+    ///
+    /// Host calls are synchronous in a guest, so the future completes without
+    /// a runtime and is driven to completion on the calling thread.
+    #[cfg(not(feature = "native"))]
+    pub fn run(&self, user_input: Option<I>) -> Result<O> {
+        futures::executor::block_on(self.run_async(user_input))
     }
 
     /// Adds a tool/context result to the conversation history.

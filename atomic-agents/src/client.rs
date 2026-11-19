@@ -25,8 +25,9 @@ use types::{ChatChunk, ChatRequest, ChatResponse};
 /// Implement this trait to add support for a new LLM provider. The framework ships
 /// with implementations for OpenAI-compatible APIs, Anthropic, and Google Gemini.
 ///
-/// All methods are async. For synchronous usage, the `AtomicAgent` provides sync
-/// wrappers that use `tokio::task::block_in_place`.
+/// All methods are async. For synchronous usage, the `AtomicAgent` provides a sync
+/// wrapper that uses `tokio::task::block_in_place` with the `native` feature and
+/// `futures::executor::block_on` without it (host calls are synchronous in a guest).
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Sends a chat completion request and returns the full response.

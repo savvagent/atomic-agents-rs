@@ -1,12 +1,16 @@
+#[cfg(feature = "native")]
 use std::collections::HashMap;
+#[cfg(feature = "native")]
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::client::types::ChatMessage;
 use crate::error::Error;
 
 /// Tokenizers cached per model name; `None` records a model without a BPE.
+#[cfg(feature = "native")]
 type TokenizerCache = Mutex<HashMap<String, Option<Arc<tiktoken_rs::CoreBPE>>>>;
 
+#[cfg(feature = "native")]
 fn tokenizer_cache() -> &'static TokenizerCache {
     static CACHE: OnceLock<TokenizerCache> = OnceLock::new();
     CACHE.get_or_init(Default::default)
@@ -33,7 +37,8 @@ pub struct TokenCountResult {
 
 /// Provider-agnostic token counter.
 ///
-/// Uses `tiktoken-rs` for OpenAI models and approximate counting for others.
+/// Uses `tiktoken-rs` for OpenAI models (with the `native` feature) and
+/// approximate counting for others.
 pub struct TokenCounter;
 
 impl TokenCounter {
@@ -64,15 +69,14 @@ impl TokenCounter {
 
     /// Counts tokens in a text string.
     pub fn count_text(model: &str, text: &str) -> Result<usize, Error> {
-        // Try tiktoken for OpenAI models
-        let bpe = Self::get_tokenizer(model);
-        match bpe {
-            Some(bpe) => Ok(bpe.encode_with_special_tokens(text).len()),
-            None => {
-                // Approximate: ~4 characters per token for non-OpenAI models
-                Ok((text.len() + 3) / 4)
-            }
+        #[cfg(feature = "native")]
+        if let Some(bpe) = Self::get_tokenizer(model) {
+            return Ok(bpe.encode_with_special_tokens(text).len());
         }
+        #[cfg(not(feature = "native"))]
+        let _ = model;
+        // Approximate: ~4 characters per token when no tokenizer is available
+        Ok(text.len().div_ceil(4))
     }
 
     /// Returns the maximum context window for a model (if known).
@@ -147,6 +151,7 @@ impl TokenCounter {
     }
 
     /// Returns the tokenizer for `model`, building it at most once per model.
+    #[cfg(feature = "native")]
     fn get_tokenizer(model: &str) -> Option<Arc<tiktoken_rs::CoreBPE>> {
         let mut cache = tokenizer_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = cache.get(model) {
