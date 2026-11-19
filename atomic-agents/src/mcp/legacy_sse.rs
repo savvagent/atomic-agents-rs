@@ -32,6 +32,9 @@ const CONNECT_TIMEOUT: Duration = super::transport::DEFAULT_CONNECT_TIMEOUT;
 /// bound.
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Default time allowed for each `POST`.
+const POST_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Tunable limits; tests lower them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Limits {
@@ -39,6 +42,10 @@ pub(crate) struct Limits {
     pub(crate) connect_timeout: Duration,
     /// Most bytes accepted without an event boundary.
     pub(crate) max_event_bytes: usize,
+    /// Time allowed for each client-to-server `POST`. Set per request rather
+    /// than on the client, because a client-wide timeout would also cut off
+    /// the long-lived `GET` stream.
+    pub(crate) post_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -46,6 +53,7 @@ impl Default for Limits {
         Self {
             connect_timeout: CONNECT_TIMEOUT,
             max_event_bytes: MAX_SSE_EVENT_BYTES,
+            post_timeout: POST_TIMEOUT,
         }
     }
 }
@@ -152,6 +160,7 @@ pub(crate) struct LegacySseTransport {
     /// `POST` carry them.
     headers: HeaderMap,
     post_url: url::Url,
+    post_timeout: Duration,
     rx: mpsc::Receiver<ServerJsonRpcMessage>,
     reader: AbortOnDrop,
 }
@@ -184,7 +193,7 @@ impl LegacySseTransport {
             .map_err(|e| LegacySseError(format!("invalid SSE URL: {e}")))?;
         tokio::time::timeout(
             limits.connect_timeout,
-            Self::open(http, sse_url, headers, limits.max_event_bytes),
+            Self::open(http, sse_url, headers, limits),
         )
         .await
         .map_err(|_| LegacySseError("timed out connecting (no endpoint event)".into()))?
@@ -194,7 +203,7 @@ impl LegacySseTransport {
         http: reqwest::Client,
         sse_url: url::Url,
         headers: HeaderMap,
-        max_event_bytes: usize,
+        limits: Limits,
     ) -> Result<Self, LegacySseError> {
         let resp = http
             .get(sse_url.clone())
@@ -214,7 +223,7 @@ impl LegacySseTransport {
         let (ep_tx, ep_rx) = oneshot::channel::<Result<String, &'static str>>();
         let mut ep_tx = Some(ep_tx);
         let reader = AbortOnDrop(tokio::spawn(async move {
-            let bytes = cap_event_bytes(resp.bytes_stream(), max_event_bytes);
+            let bytes = cap_event_bytes(resp.bytes_stream(), limits.max_event_bytes);
             let mut events = Box::pin(bytes.eventsource());
             // Why the stream ended; only a fixed kind, never a payload.
             let mut ended = "stream closed";
@@ -276,6 +285,7 @@ impl LegacySseTransport {
             http,
             headers,
             post_url,
+            post_timeout: limits.post_timeout,
             rx,
             reader,
         })
@@ -289,15 +299,17 @@ impl Transport<RoleClient> for LegacySseTransport {
         &mut self,
         item: ClientJsonRpcMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let (http, url, headers) = (
+        let (http, url, headers, timeout) = (
             self.http.clone(),
             self.post_url.clone(),
             self.headers.clone(),
+            self.post_timeout,
         );
         async move {
             let resp = http
                 .post(url)
                 .headers(headers)
+                .timeout(timeout)
                 .json(&item)
                 .send()
                 .await

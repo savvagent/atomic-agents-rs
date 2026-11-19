@@ -156,7 +156,10 @@ impl McpTransport {
     /// Sets the time allowed for each request (each page of a list, a tool
     /// call, a resource read, a prompt render). On expiry the request is
     /// abandoned (rmcp sends `notifications/cancelled`) and an error is
-    /// returned; the session stays usable. Applies to every variant.
+    /// returned; the session stays usable. Cancellation is advisory: a server
+    /// may already have applied a tool call's side effects, so treat a
+    /// timed-out call as possibly applied before retrying. Applies to every
+    /// variant.
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         match &mut self {
             Self::Stdio {
@@ -606,6 +609,7 @@ async fn open_transport(
             url,
             headers,
             connect_timeout,
+            request_timeout,
             ..
         } => {
             let map = sse_header_map(headers).map_err(|e| fail(&e))?;
@@ -620,6 +624,7 @@ async fn open_transport(
                 .map_err(|e| fail(&e.without_url()))?;
             let limits = Limits {
                 connect_timeout: *connect_timeout,
+                post_timeout: *request_timeout,
                 ..Limits::default()
             };
             let t = LegacySseTransport::connect_with(http, url, map, limits)
