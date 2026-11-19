@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use atomic_agents::prelude::*;
 use lopdf::{Dictionary, Document, Object};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::net_guard::NetGuard;
 
 fn default_true() -> bool {
     true
@@ -91,6 +94,14 @@ pub struct PdfReaderConfig {
     pub timeout: Duration,
     /// Maximum allowed PDF size in bytes when downloading from a URL (default 50 MB).
     pub max_size_bytes: u64,
+    /// Allow URL sources that resolve to loopback, private, link-local (including
+    /// cloud metadata endpoints), CGNAT, multicast or unspecified addresses.
+    /// Default `false`, which blocks SSRF through LLM-supplied URLs.
+    pub allow_private_hosts: bool,
+    /// Restrict local-path sources to files inside this directory. The path is
+    /// canonicalized (resolving `..` and symlinks) and must lie within the
+    /// canonicalized directory. Default `None`: any readable local file may be read.
+    pub allowed_dir: Option<PathBuf>,
 }
 
 impl Default for PdfReaderConfig {
@@ -104,6 +115,8 @@ impl Default for PdfReaderConfig {
                 .to_string(),
             timeout: Duration::from_secs(30),
             max_size_bytes: 50 * 1024 * 1024,
+            allow_private_hosts: false,
+            allowed_dir: None,
         }
     }
 }
@@ -111,6 +124,15 @@ impl Default for PdfReaderConfig {
 /// Tool for extracting text and metadata from local or remote PDF files.
 ///
 /// Requires the `pdf-reader` feature.
+///
+/// # Security
+///
+/// The `source` is supplied by the caller (typically an LLM). URL sources are
+/// checked against private/loopback/link-local addresses (see
+/// [`PdfReaderConfig::allow_private_hosts`]) and redirects are re-validated.
+/// Local paths are **unrestricted by default**, so an agent can read any file the
+/// process can read; set [`PdfReaderConfig::allowed_dir`] when the input is untrusted.
+/// Only PDF content is parsed, but error messages may reveal whether a path exists.
 ///
 /// # Example
 ///
@@ -130,7 +152,10 @@ impl Default for PdfReaderConfig {
 pub struct PdfReaderTool {
     config: ComponentConfig,
     max_size_bytes: u64,
-    client: reqwest::Client,
+    user_agent: String,
+    timeout: Duration,
+    guard: NetGuard,
+    allowed_dir: Option<PathBuf>,
 }
 
 fn is_url(source: &str) -> bool {
@@ -140,15 +165,13 @@ fn is_url(source: &str) -> bool {
 
 impl PdfReaderTool {
     pub fn new(config: PdfReaderConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(config.user_agent)
-            .timeout(config.timeout)
-            .build()
-            .unwrap_or_default();
         Self {
             config: config.component,
             max_size_bytes: config.max_size_bytes,
-            client,
+            user_agent: config.user_agent,
+            timeout: config.timeout,
+            guard: NetGuard::new(config.allow_private_hosts),
+            allowed_dir: config.allowed_dir,
         }
     }
 
@@ -203,10 +226,8 @@ impl PdfReaderTool {
 
     async fn download(&self, url: &str) -> std::result::Result<Vec<u8>, String> {
         let mut response = self
-            .client
-            .get(url)
-            .header("Accept", "application/pdf")
-            .send()
+            .guard
+            .get(url, &self.user_agent, "application/pdf", self.timeout)
             .await
             .map_err(|e| format!("Failed to download PDF: {e}"))?;
         let status = response.status();
@@ -250,6 +271,17 @@ impl PdfReaderTool {
         };
         if !path.exists() {
             return Err(format!("PDF not found at '{source}'."));
+        }
+        if let Some(dir) = &self.allowed_dir {
+            let dir = dir
+                .canonicalize()
+                .map_err(|e| format!("Allowed directory is not accessible: {e}"))?;
+            let real = path
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve '{source}': {e}"))?;
+            if !real.starts_with(&dir) {
+                return Err(format!("Access denied: '{source}' is outside the allowed directory."));
+            }
         }
         if !path.is_file() {
             return Err(format!("'{source}' is not a file."));
@@ -573,12 +605,16 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(pdf.clone()))
             .mount(&server)
             .await;
-        let tool = PdfReaderTool::new(PdfReaderConfig::default());
+        let tool = PdfReaderTool::new(PdfReaderConfig {
+            allow_private_hosts: true,
+            ..Default::default()
+        });
         let out = tool.run(input(&format!("{}/a.pdf", server.uri()))).unwrap();
         assert!(out.error.is_none(), "{:?}", out.error);
         assert!(out.text.contains("Remote"));
 
         let small = PdfReaderTool::new(PdfReaderConfig {
+            allow_private_hosts: true,
             max_size_bytes: 10,
             ..Default::default()
         });
@@ -593,9 +629,46 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let tool = PdfReaderTool::new(PdfReaderConfig::default());
+        let tool = PdfReaderTool::new(PdfReaderConfig {
+            allow_private_hosts: true,
+            ..Default::default()
+        });
         let out = tool.run(input(&format!("{}/a.pdf", server.uri()))).unwrap();
         assert!(out.error.unwrap().contains("404"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn private_hosts_blocked_by_default() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sample_pdf(&["x"])))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let tool = PdfReaderTool::new(PdfReaderConfig::default());
+        let out = tool.run(input(&format!("{}/a.pdf", server.uri()))).unwrap();
+        assert!(out.error.unwrap().contains("non-public"));
+        let meta = tool.run(input("http://169.254.169.254/latest/meta-data")).unwrap();
+        assert!(meta.error.unwrap().contains("non-public"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allowed_dir_blocks_escape() {
+        let base = std::env::temp_dir().join(format!("atomic_forge_pdf_dir_{}", std::process::id()));
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::write(allowed.join("ok.pdf"), sample_pdf(&["Inside"])).unwrap();
+        std::fs::write(base.join("secret.pdf"), sample_pdf(&["Outside"])).unwrap();
+        let tool = PdfReaderTool::new(PdfReaderConfig {
+            allowed_dir: Some(allowed.clone()),
+            ..Default::default()
+        });
+        let ok = tool.run(input(allowed.join("ok.pdf").to_str().unwrap())).unwrap();
+        assert!(ok.error.is_none(), "{:?}", ok.error);
+        let escape = format!("{}/../secret.pdf", allowed.display());
+        let out = tool.run(input(&escape)).unwrap();
+        assert!(out.error.unwrap().contains("outside the allowed directory"));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[tokio::test(flavor = "multi_thread")]
