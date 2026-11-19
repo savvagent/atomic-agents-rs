@@ -23,3 +23,5 @@ pub mod arxiv_search;
 pub mod hackernews_search;
 pub mod wikipedia_search;
 pub mod weather;
+#[cfg(feature = "datetime")]
+pub mod datetime_tool;
