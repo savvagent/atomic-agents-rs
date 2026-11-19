@@ -108,6 +108,8 @@ impl AnthropicClient {
             // with a 400, so let the model choose and instruct it in the
             // system prompt to answer through the tool.
             body["tool_choice"] = serde_json::json!({"type": "auto"});
+            // Agents send exactly one tool, the output schema, so naming the
+            // first tool names the extraction tool.
             if let Some(first) = tools.first() {
                 if !system_text.is_empty() {
                     system_text.push_str("\n\n");
