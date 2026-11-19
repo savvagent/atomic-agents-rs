@@ -25,19 +25,19 @@
 //! - `datetime` - enables `datetime_tool` (adds `chrono` and `chrono-tz`)
 //! - `pdf-reader` - enables `pdf_reader` (adds `lopdf`)
 
-pub mod net_guard;
-pub mod calculator;
-pub mod tavily_search;
-pub mod webpage_scraper;
-pub mod youtube_transcript;
-pub mod searxng_search;
-pub mod bocha_search;
 pub mod arxiv_search;
-pub mod hackernews_search;
-pub mod wikipedia_search;
-pub mod weather;
+pub mod bocha_search;
+pub mod calculator;
 #[cfg(feature = "datetime")]
 pub mod datetime_tool;
+pub mod firecrawl_search;
+pub mod hackernews_search;
+pub mod net_guard;
 #[cfg(feature = "pdf-reader")]
 pub mod pdf_reader;
-pub mod firecrawl_search;
+pub mod searxng_search;
+pub mod tavily_search;
+pub mod weather;
+pub mod webpage_scraper;
+pub mod wikipedia_search;
+pub mod youtube_transcript;

@@ -146,8 +146,9 @@ impl Default for HackerNewsSearchConfig {
                 .with_title("HackerNewsSearch")
                 .with_description("Search Hacker News via the Algolia API"),
             base_url: "https://hn.algolia.com/api/v1".to_string(),
-            user_agent: "atomic-agents-hackernews-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
-                .to_string(),
+            user_agent:
+                "atomic-agents-hackernews-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
+                    .to_string(),
             timeout: Duration::from_secs(15),
         }
     }
@@ -244,7 +245,10 @@ impl HackerNewsSearchTool {
         let mut params = vec![
             ("query", query.to_string()),
             ("tags", input.tags.as_str().to_string()),
-            ("hitsPerPage", input.max_results_per_query.clamp(1, 50).to_string()),
+            (
+                "hitsPerPage",
+                input.max_results_per_query.clamp(1, 50).to_string(),
+            ),
         ];
         if let Some(nf) = input.numeric_filters.as_deref().filter(|s| !s.is_empty()) {
             params.push(("numericFilters", nf.to_string()));
@@ -345,10 +349,12 @@ mod tests {
             serde_json::from_value(json!({"queries": ["a"], "tags": "show_hn", "sort_by": "date"}))
                 .unwrap();
         assert_eq!(j.tags, HackerNewsTag::ShowHn);
-        assert!(serde_json::from_value::<HackerNewsSearchInput>(
-            json!({"queries": ["a"], "tags": "nope"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<HackerNewsSearchInput>(
+                json!({"queries": ["a"], "tags": "nope"})
+            )
+            .is_err()
+        );
     }
 
     #[test]

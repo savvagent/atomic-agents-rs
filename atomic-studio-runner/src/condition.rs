@@ -14,9 +14,7 @@ pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool> {
             let field_val = get_field(data, field)?;
             match &field_val {
                 Value::String(s) => Ok(s.contains(value.as_str())),
-                Value::Array(arr) => Ok(arr.iter().any(|v| {
-                    v.as_str().is_some_and(|s| s == value)
-                })),
+                Value::Array(arr) => Ok(arr.iter().any(|v| v.as_str().is_some_and(|s| s == value))),
                 _ => Ok(false),
             }
         }
@@ -65,9 +63,9 @@ pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool> {
 fn get_field<'a>(data: &'a Value, field: &str) -> Result<&'a Value> {
     let mut current = data;
     for part in field.split('.') {
-        current = current.get(part).ok_or_else(|| {
-            Error::Condition(format!("Field '{field}' not found in data"))
-        })?;
+        current = current
+            .get(part)
+            .ok_or_else(|| Error::Condition(format!("Field '{field}' not found in data")))?;
     }
     if current.is_null() {
         return Err(Error::Condition(format!("Field '{field}' is null")));
@@ -135,8 +133,24 @@ mod tests {
     #[test]
     fn test_exists() {
         let data = json!({"name": "test"});
-        assert!(evaluate(&ConditionExpr::Exists { field: "name".into() }, &data).unwrap());
-        assert!(!evaluate(&ConditionExpr::Exists { field: "missing".into() }, &data).unwrap());
+        assert!(
+            evaluate(
+                &ConditionExpr::Exists {
+                    field: "name".into()
+                },
+                &data
+            )
+            .unwrap()
+        );
+        assert!(
+            !evaluate(
+                &ConditionExpr::Exists {
+                    field: "missing".into()
+                },
+                &data
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -154,8 +168,14 @@ mod tests {
         let data = json!({"a": 1, "b": 2});
         let expr = ConditionExpr::And {
             conditions: vec![
-                ConditionExpr::Equals { field: "a".into(), value: json!(1) },
-                ConditionExpr::Equals { field: "b".into(), value: json!(2) },
+                ConditionExpr::Equals {
+                    field: "a".into(),
+                    value: json!(1),
+                },
+                ConditionExpr::Equals {
+                    field: "b".into(),
+                    value: json!(2),
+                },
             ],
         };
         assert!(evaluate(&expr, &data).unwrap());

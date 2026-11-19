@@ -279,12 +279,8 @@ pub fn check_schema_compatibility(
         })
         .unwrap_or_default();
 
-    let source_props = source_schema
-        .get("properties")
-        .and_then(|p| p.as_object());
-    let target_props = target_schema
-        .get("properties")
-        .and_then(|p| p.as_object());
+    let source_props = source_schema.get("properties").and_then(|p| p.as_object());
+    let target_props = target_schema.get("properties").and_then(|p| p.as_object());
 
     let empty_map = serde_json::Map::new();
     if let Some(target_props) = target_props {
@@ -364,7 +360,12 @@ mod tests {
         });
         let report = validate_pipeline(&pipeline);
         assert!(!report.is_valid());
-        assert!(report.errors.iter().any(|e| e.message.contains("Duplicate")));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Duplicate"))
+        );
     }
 
     #[test]

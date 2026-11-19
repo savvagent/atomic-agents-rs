@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, broadcast};
 
 use crate::condition;
 use crate::dynamic_agent::DynamicAgent;
@@ -48,10 +48,7 @@ pub struct PipelineInterpreter {
 }
 
 impl PipelineInterpreter {
-    pub fn new(
-        pipeline: PipelineDefinition,
-        client_factory: Box<dyn ClientFactory>,
-    ) -> Self {
+    pub fn new(pipeline: PipelineDefinition, client_factory: Box<dyn ClientFactory>) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             pipeline,
@@ -114,7 +111,10 @@ impl PipelineInterpreter {
             Arc::new(Mutex::new(HashMap::new()));
         for node in &self.pipeline.nodes {
             if matches!(node.config, NodeConfig::Merge(_)) {
-                merge_inputs.lock().await.insert(node.id.clone(), Vec::new());
+                merge_inputs
+                    .lock()
+                    .await
+                    .insert(node.id.clone(), Vec::new());
             }
         }
 
@@ -145,23 +145,21 @@ impl PipelineInterpreter {
 
         loop {
             // Try to receive a ready node, with a timeout to check if we're done
-            let node_id = match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                ready_rx.recv(),
-            )
-            .await
-            {
-                Ok(Ok(id)) => id,
-                Ok(Err(_)) => break, // Channel closed
-                Err(_) => {
-                    // Timeout — check if all done
-                    let active = *active_count.lock().await;
-                    if active == 0 && ready_rx.is_empty() {
-                        break;
+            let node_id =
+                match tokio::time::timeout(std::time::Duration::from_millis(100), ready_rx.recv())
+                    .await
+                {
+                    Ok(Ok(id)) => id,
+                    Ok(Err(_)) => break, // Channel closed
+                    Err(_) => {
+                        // Timeout — check if all done
+                        let active = *active_count.lock().await;
+                        if active == 0 && ready_rx.is_empty() {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
 
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             *active_count.lock().await += 1;
@@ -240,9 +238,7 @@ impl PipelineInterpreter {
                                 let route = evaluate_router(router_config, &output);
                                 outgoing_edges
                                     .iter()
-                                    .filter(|(_, handle)| {
-                                        handle.as_deref() == Some(route.as_str())
-                                    })
+                                    .filter(|(_, handle)| handle.as_deref() == Some(route.as_str()))
                                     .cloned()
                                     .collect::<Vec<_>>()
                             }
@@ -390,8 +386,7 @@ async fn execute_node(
                 .unwrap_or(&settings.default_model)
                 .to_string();
 
-            let mut agent =
-                DynamicAgent::new(client, config, model, input_schema, output_schema);
+            let mut agent = DynamicAgent::new(client, config, model, input_schema, output_schema);
 
             agent.run(input).await.map_err(|e| Error::NodeExecution {
                 node_id: node.id.clone(),
@@ -455,9 +450,7 @@ async fn get_upstream_output(
             return Ok(value.clone());
         }
     }
-    Err(Error::Pipeline(
-        "No upstream output available".to_string(),
-    ))
+    Err(Error::Pipeline("No upstream output available".to_string()))
 }
 
 /// Evaluates router conditions and returns the selected route name.

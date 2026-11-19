@@ -95,9 +95,15 @@ async fn main() -> anyhow::Result<()> {
 
             // Full execution requires a ClientFactory implementation.
             // For now, print the parsed pipeline info.
-            println!("Pipeline loaded: {} nodes, {} edges", _pipeline.nodes.len(), _pipeline.edges.len());
+            println!(
+                "Pipeline loaded: {} nodes, {} edges",
+                _pipeline.nodes.len(),
+                _pipeline.edges.len()
+            );
             println!("Input: {}", serde_json::to_string_pretty(&_input)?);
-            println!("Run command requires a ClientFactory implementation (use as library for full execution).");
+            println!(
+                "Run command requires a ClientFactory implementation (use as library for full execution)."
+            );
         }
         Commands::Serve { addr, static_dir } => {
             server::serve(addr, static_dir).await?;

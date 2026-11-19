@@ -225,16 +225,14 @@ mod tests {
 
     #[test]
     fn test_extract_video_id_full_url() {
-        let id = YouTubeTranscriptTool::extract_video_id(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        );
+        let id =
+            YouTubeTranscriptTool::extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
     }
 
     #[test]
     fn test_extract_video_id_short_url() {
-        let id =
-            YouTubeTranscriptTool::extract_video_id("https://youtu.be/dQw4w9WgXcQ");
+        let id = YouTubeTranscriptTool::extract_video_id("https://youtu.be/dQw4w9WgXcQ");
         assert_eq!(id, Some("dQw4w9WgXcQ".to_string()));
     }
 

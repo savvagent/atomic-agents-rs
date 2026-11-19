@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use reqwest::Client;
 
-use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use super::LlmClient;
+use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use crate::error::{ClientError, Error};
 
 /// Client for the Anthropic Messages API.
@@ -166,8 +166,7 @@ impl LlmClient for AnthropicClient {
             }));
         }
 
-        let response_json: serde_json::Value =
-            response.json().await.map_err(ClientError::Http)?;
+        let response_json: serde_json::Value = response.json().await.map_err(ClientError::Http)?;
 
         parse_response(&response_json)
     }
@@ -216,53 +215,53 @@ impl LlmClient for AnthropicClient {
 /// plain `text` block instead of a `tool_use` block; both are accepted and the
 /// last recognised block wins.
 fn parse_response(json: &serde_json::Value) -> Result<ChatResponse, Error> {
-        // Extract content from Anthropic response
-        // Anthropic returns content as an array of content blocks
-        let content = if let Some(content_blocks) = json.get("content") {
-            let mut result = String::new();
-            if let Some(blocks) = content_blocks.as_array() {
-                for block in blocks {
-                    match block.get("type").and_then(|t| t.as_str()) {
-                        Some("tool_use") => {
-                            // Tool use block contains structured output
-                            if let Some(input) = block.get("input") {
-                                result = serde_json::to_string(input).unwrap_or_default();
-                            }
+    // Extract content from Anthropic response
+    // Anthropic returns content as an array of content blocks
+    let content = if let Some(content_blocks) = json.get("content") {
+        let mut result = String::new();
+        if let Some(blocks) = content_blocks.as_array() {
+            for block in blocks {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_use") => {
+                        // Tool use block contains structured output
+                        if let Some(input) = block.get("input") {
+                            result = serde_json::to_string(input).unwrap_or_default();
                         }
-                        Some("text") => {
-                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                result = text.to_string();
-                            }
-                        }
-                        _ => {}
                     }
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            result = text.to_string();
+                        }
+                    }
+                    _ => {}
                 }
             }
-            result
-        } else {
-            String::new()
-        };
+        }
+        result
+    } else {
+        String::new()
+    };
 
-        let usage = json.get("usage").map(|u| Usage {
-            prompt_tokens: u
-                .get("input_tokens")
-                .and_then(|v| v.as_u64().map(|n| n as u32)),
-            completion_tokens: u
-                .get("output_tokens")
-                .and_then(|v| v.as_u64().map(|n| n as u32)),
-            total_tokens: None, // Anthropic doesn't return total
-        });
+    let usage = json.get("usage").map(|u| Usage {
+        prompt_tokens: u
+            .get("input_tokens")
+            .and_then(|v| v.as_u64().map(|n| n as u32)),
+        completion_tokens: u
+            .get("output_tokens")
+            .and_then(|v| v.as_u64().map(|n| n as u32)),
+        total_tokens: None, // Anthropic doesn't return total
+    });
 
-        let finish_reason = json
-            .get("stop_reason")
-            .and_then(|f| f.as_str())
-            .map(String::from);
+    let finish_reason = json
+        .get("stop_reason")
+        .and_then(|f| f.as_str())
+        .map(String::from);
 
-        Ok(ChatResponse {
-            content,
-            finish_reason,
-            usage,
-        })
+    Ok(ChatResponse {
+        content,
+        finish_reason,
+        usage,
+    })
 }
 
 /// Parses Anthropic's SSE stream format into ChatChunks.
@@ -303,9 +302,7 @@ where
                     this.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(Error::Client(
-                        ClientError::Http(e),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
                     if let Some(chunk) = parse_anthropic_sse(&mut this.buffer) {
@@ -445,8 +442,8 @@ mod tests {
 
     #[test]
     fn parses_text_only_response() {
-        let r = parse_response(&json!({"content": [{"type": "text", "text": "{\"a\":1}"}]}))
-            .unwrap();
+        let r =
+            parse_response(&json!({"content": [{"type": "text", "text": "{\"a\":1}"}]})).unwrap();
         assert_eq!(r.content, "{\"a\":1}");
     }
 

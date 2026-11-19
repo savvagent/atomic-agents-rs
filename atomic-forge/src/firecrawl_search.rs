@@ -208,7 +208,10 @@ fn redact_key_pattern(text: &str) -> String {
             i += 35;
         } else {
             // Copy one whole character.
-            let ch = text[i..].chars().next().expect("index is on a char boundary");
+            let ch = text[i..]
+                .chars()
+                .next()
+                .expect("index is on a char boundary");
             out.push(ch);
             i += ch.len_utf8();
         }
@@ -266,7 +269,11 @@ impl FirecrawlSearchTool {
     /// assert!(!FirecrawlSearchTool::usable_url("https://example.com:0/"));
     /// ```
     pub fn usable_url(raw: &str) -> bool {
-        if raw.is_empty() || raw.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
+        if raw.is_empty()
+            || raw
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        {
             return false;
         }
         match url::Url::parse(raw) {
@@ -323,7 +330,8 @@ impl FirecrawlSearchTool {
             body["tbs"] = Value::from(range.tbs());
         }
         if input.include_content {
-            body["scrapeOptions"] = serde_json::json!({"formats": ["markdown"], "onlyMainContent": true});
+            body["scrapeOptions"] =
+                serde_json::json!({"formats": ["markdown"], "onlyMainContent": true});
         }
         body
     }
@@ -369,7 +377,9 @@ impl FirecrawlSearchTool {
         query: &str,
         input: &FirecrawlSearchInput,
     ) -> std::result::Result<Vec<FirecrawlSearchResultItem>, String> {
-        let fail = |detail: String| self.redact(&format!("Firecrawl search failed for '{query}': {detail}"));
+        let fail = |detail: String| {
+            self.redact(&format!("Firecrawl search failed for '{query}': {detail}"))
+        };
         let response = self
             .client
             .post(format!("{}/search", self.base_url))
@@ -380,7 +390,8 @@ impl FirecrawlSearchTool {
             .map_err(|e| fail(format!("request failed: {}", e.without_url())))?;
         let status = response.status();
         let payload: Value = response.json().await.unwrap_or(Value::Null);
-        let succeeded = status == reqwest::StatusCode::OK && payload.get("success") == Some(&Value::Bool(true));
+        let succeeded =
+            status == reqwest::StatusCode::OK && payload.get("success") == Some(&Value::Bool(true));
         if !succeeded {
             let reason = payload
                 .get("error")
@@ -396,8 +407,9 @@ impl FirecrawlSearchTool {
                 });
             return Err(fail(format!("{} {reason}", status.as_u16())));
         }
-        let mut items = Self::parse_response(&payload, query, input.search_type, self.max_content_chars)
-            .map_err(fail)?;
+        let mut items =
+            Self::parse_response(&payload, query, input.search_type, self.max_content_chars)
+                .map_err(fail)?;
         items.truncate(input.max_results_per_query.clamp(1, 100) as usize);
         Ok(items)
     }
@@ -427,7 +439,9 @@ impl Tool for FirecrawlSearchTool {
             }
         }
         if queries.is_empty() {
-            return Err(Error::Validation("At least one query is required.".to_string()));
+            return Err(Error::Validation(
+                "At least one query is required.".to_string(),
+            ));
         }
 
         let groups = tokio::task::block_in_place(|| {
@@ -494,10 +508,12 @@ mod tests {
         assert_eq!(i.search_type, FirecrawlSearchType::Web);
         assert_eq!(i.max_results_per_query, 5);
         assert!(!i.include_content);
-        assert!(serde_json::from_value::<FirecrawlSearchInput>(
-            json!({"queries": ["a"], "search_type": "images"})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<FirecrawlSearchInput>(
+                json!({"queries": ["a"], "search_type": "images"})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -526,7 +542,12 @@ mod tests {
 
         for bad in [json!(true), json!(0), json!(1.5), json!("1"), json!(-3)] {
             let hit = json!({"url": "https://a.com", "position": bad});
-            assert_eq!(FirecrawlSearchTool::to_item(&hit, "q", None).unwrap().position, None);
+            assert_eq!(
+                FirecrawlSearchTool::to_item(&hit, "q", None)
+                    .unwrap()
+                    .position,
+                None
+            );
         }
         assert!(FirecrawlSearchTool::to_item(&json!({"title": "x"}), "q", None).is_none());
     }
@@ -535,17 +556,30 @@ mod tests {
     fn parse_response_shapes() {
         let t = FirecrawlSearchType::Web;
         let ok = json!({"success": true, "data": {"web": [{"url": "https://a.com"}]}});
-        assert_eq!(FirecrawlSearchTool::parse_response(&ok, "q", t, None).unwrap().len(), 1);
+        assert_eq!(
+            FirecrawlSearchTool::parse_response(&ok, "q", t, None)
+                .unwrap()
+                .len(),
+            1
+        );
         let empty = json!({"success": true, "data": {}});
-        assert!(FirecrawlSearchTool::parse_response(&empty, "q", t, None).unwrap().is_empty());
+        assert!(
+            FirecrawlSearchTool::parse_response(&empty, "q", t, None)
+                .unwrap()
+                .is_empty()
+        );
         let bad_shape = json!({"success": true, "data": []});
-        assert!(FirecrawlSearchTool::parse_response(&bad_shape, "q", t, None)
-            .unwrap_err()
-            .contains("unexpected response shape"));
+        assert!(
+            FirecrawlSearchTool::parse_response(&bad_shape, "q", t, None)
+                .unwrap_err()
+                .contains("unexpected response shape")
+        );
         let unusable = json!({"data": {"web": [{"url": "nope"}]}});
-        assert!(FirecrawlSearchTool::parse_response(&unusable, "q", t, None)
-            .unwrap_err()
-            .contains("usable url"));
+        assert!(
+            FirecrawlSearchTool::parse_response(&unusable, "q", t, None)
+                .unwrap_err()
+                .contains("usable url")
+        );
     }
 
     #[test]
@@ -556,7 +590,10 @@ mod tests {
         // A different key in the right shape is redacted too.
         let other = "fc-ffffffffffffffffffffffffffffffff";
         assert_eq!(redact_key_pattern(other), "[redacted]");
-        assert_eq!(redact_key_pattern("xfc-ffffffffffffffffffffffffffffffff"), "xfc-ffffffffffffffffffffffffffffffff");
+        assert_eq!(
+            redact_key_pattern("xfc-ffffffffffffffffffffffffffffffff"),
+            "xfc-ffffffffffffffffffffffffffffffff"
+        );
         assert_eq!(redact_key_pattern("ünï fc-short"), "ünï fc-short");
     }
 
@@ -647,7 +684,9 @@ mod tests {
     async fn all_failures_raise() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": "Unauthorized"})))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"error": "Unauthorized"})),
+            )
             .mount(&server)
             .await;
         let tool = tool_for(&server.uri());

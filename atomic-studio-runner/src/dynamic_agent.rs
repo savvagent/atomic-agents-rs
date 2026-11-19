@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
+use atomic_agents::client::LlmClient;
 use atomic_agents::client::types::{
     ChatMessage, ChatRequest, FunctionDefinition, ResponseFormat, ToolDefinition,
 };
-use atomic_agents::client::LlmClient;
 use serde_json::Value;
 
 use crate::error::{Error, Result};
@@ -130,7 +130,10 @@ impl DynamicAgent {
                         });
                     }
                     attempts += 1;
-                    self.append_retry_messages(&response.content, "Output did not match the required JSON schema.");
+                    self.append_retry_messages(
+                        &response.content,
+                        "Output did not match the required JSON schema.",
+                    );
                 }
                 Err(e) => {
                     if attempts >= self.max_retries {
@@ -157,7 +160,10 @@ impl DynamicAgent {
         // System message
         let mut prompt = self.system_prompt.clone();
 
-        if matches!(self.extraction_mode, ExtractionMode::Json | ExtractionMode::MdJson) {
+        if matches!(
+            self.extraction_mode,
+            ExtractionMode::Json | ExtractionMode::MdJson
+        ) {
             let schema_json = serde_json::to_string_pretty(&self.output_schema).unwrap_or_default();
             prompt.push_str(&format!(
                 "\n\n# RESPONSE SCHEMA\nYou must respond with JSON matching this schema:\n```json\n{}\n```\n",
@@ -270,7 +276,9 @@ fn build_system_prompt(config: &SystemPromptConfig) -> String {
     if sections.is_empty() {
         "You are a helpful AI assistant. Always respond using the proper JSON schema.".to_string()
     } else {
-        sections.push("# OUTPUT INSTRUCTIONS\n- Always respond using the proper JSON schema.\n".to_string());
+        sections.push(
+            "# OUTPUT INSTRUCTIONS\n- Always respond using the proper JSON schema.\n".to_string(),
+        );
         sections.join("\n")
     }
 }

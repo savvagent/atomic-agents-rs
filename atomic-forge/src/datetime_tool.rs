@@ -211,7 +211,8 @@ impl Zone {
         let Zone::Named(tz) = self else { return None };
         let probe = naive.checked_sub_signed(Duration::hours(24))?;
         let before = tz.from_local_datetime(&probe).earliest()?.offset().fix();
-        let utc = naive.checked_sub_signed(Duration::seconds(i64::from(before.local_minus_utc())))?;
+        let utc =
+            naive.checked_sub_signed(Duration::seconds(i64::from(before.local_minus_utc())))?;
         Some(Utc.from_utc_datetime(&utc))
     }
 }
@@ -439,10 +440,18 @@ impl DateTimeTool {
         match op {
             DateTimeOperation::Now => {
                 let zone = Zone::named(&input.timezone)?;
-                Ok(Moment { utc: Utc::now(), zone }.build("now"))
+                Ok(Moment {
+                    utc: Utc::now(),
+                    zone,
+                }
+                .build("now"))
             }
             DateTimeOperation::Parse => {
-                let value = input.input.as_deref().filter(|s| !s.is_empty()).ok_or("'parse' operation requires `input`.")?;
+                let value = input
+                    .input
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("'parse' operation requires `input`.")?;
                 Ok(Self::parse(value, &input.timezone)?.build("parse"))
             }
             DateTimeOperation::Convert => {
@@ -457,7 +466,11 @@ impl DateTimeTool {
                 Ok(Moment { utc: m.utc, zone }.build("convert"))
             }
             DateTimeOperation::Shift => {
-                let value = input.input.as_deref().filter(|s| !s.is_empty()).ok_or("'shift' operation requires `input`.")?;
+                let value = input
+                    .input
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("'shift' operation requires `input`.")?;
                 let m = Self::parse(value, &input.timezone)?;
                 Ok(Self::shift(m, input)?.build("shift"))
             }
@@ -494,11 +507,13 @@ impl Tool for DateTimeTool {
     }
 
     fn run(&self, input: Self::Input) -> Result<Self::Output> {
-        Ok(Self::execute(&input).unwrap_or_else(|error| DateTimeToolOutput {
-            operation: input.operation.as_str().to_string(),
-            error: Some(error),
-            ..Default::default()
-        }))
+        Ok(
+            Self::execute(&input).unwrap_or_else(|error| DateTimeToolOutput {
+                operation: input.operation.as_str().to_string(),
+                error: Some(error),
+                ..Default::default()
+            }),
+        )
     }
 }
 
@@ -548,43 +563,75 @@ mod tests {
     #[test]
     fn parse_naive_in_zone() {
         let out = tool()
-            .run(input(DateTimeOperation::Parse, "Europe/Brussels", "2026-04-29T15:30:00"))
+            .run(input(
+                DateTimeOperation::Parse,
+                "Europe/Brussels",
+                "2026-04-29T15:30:00",
+            ))
             .unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-04-29T15:30:00+02:00"));
         assert_eq!(out.weekday.as_deref(), Some("Wednesday"));
         assert_eq!(out.human.as_deref(), Some("Wed, 29 Apr 2026 15:30 CEST"));
         assert_eq!(out.unix_timestamp, Some(1_777_469_400.0));
-        assert_eq!((out.year, out.month, out.day), (Some(2026), Some(4), Some(29)));
+        assert_eq!(
+            (out.year, out.month, out.day),
+            (Some(2026), Some(4), Some(29))
+        );
     }
 
     #[test]
     fn parse_z_and_offset_and_date_only() {
         let t = tool();
-        let z = t.run(input(DateTimeOperation::Parse, "UTC", "2026-04-29T15:30:00Z")).unwrap();
+        let z = t
+            .run(input(
+                DateTimeOperation::Parse,
+                "UTC",
+                "2026-04-29T15:30:00Z",
+            ))
+            .unwrap();
         assert_eq!(z.iso.as_deref(), Some("2026-04-29T15:30:00+00:00"));
         assert_eq!(z.timezone.as_deref(), Some("UTC"));
         let off = t
-            .run(input(DateTimeOperation::Parse, "UTC", "2026-04-29T15:30:00+05:30"))
+            .run(input(
+                DateTimeOperation::Parse,
+                "UTC",
+                "2026-04-29T15:30:00+05:30",
+            ))
             .unwrap();
         assert_eq!(off.iso.as_deref(), Some("2026-04-29T15:30:00+05:30"));
         assert_eq!(off.timezone.as_deref(), Some("UTC+05:30"));
-        let d = t.run(input(DateTimeOperation::Parse, "UTC", "2026-04-29")).unwrap();
+        let d = t
+            .run(input(DateTimeOperation::Parse, "UTC", "2026-04-29"))
+            .unwrap();
         assert_eq!(d.iso.as_deref(), Some("2026-04-29T00:00:00+00:00"));
         let frac = t
-            .run(input(DateTimeOperation::Parse, "UTC", "2026-04-29 15:30:00.25"))
+            .run(input(
+                DateTimeOperation::Parse,
+                "UTC",
+                "2026-04-29 15:30:00.25",
+            ))
             .unwrap();
-        assert_eq!(frac.iso.as_deref(), Some("2026-04-29T15:30:00.250000+00:00"));
+        assert_eq!(
+            frac.iso.as_deref(),
+            Some("2026-04-29T15:30:00.250000+00:00")
+        );
     }
 
     #[test]
     fn parse_errors() {
         let t = tool();
-        let bad = t.run(input(DateTimeOperation::Parse, "UTC", "not a date")).unwrap();
+        let bad = t
+            .run(input(DateTimeOperation::Parse, "UTC", "not a date"))
+            .unwrap();
         assert!(bad.error.unwrap().contains("Could not parse datetime"));
         assert_eq!(bad.operation, "parse");
-        let tz = t.run(input(DateTimeOperation::Parse, "Mars/Base", "2026-01-01")).unwrap();
+        let tz = t
+            .run(input(DateTimeOperation::Parse, "Mars/Base", "2026-01-01"))
+            .unwrap();
         assert!(tz.error.unwrap().contains("Unknown timezone 'Mars/Base'"));
-        let missing = t.run(DateTimeToolInput::new(DateTimeOperation::Parse)).unwrap();
+        let missing = t
+            .run(DateTimeToolInput::new(DateTimeOperation::Parse))
+            .unwrap();
         assert!(missing.error.unwrap().contains("requires `input`"));
     }
 
@@ -592,18 +639,30 @@ mod tests {
     fn parse_dst_gap_is_error_and_overlap_is_first() {
         let t = tool();
         let gap = t
-            .run(input(DateTimeOperation::Parse, "America/New_York", "2026-03-08T02:30:00"))
+            .run(input(
+                DateTimeOperation::Parse,
+                "America/New_York",
+                "2026-03-08T02:30:00",
+            ))
             .unwrap();
         assert!(gap.error.unwrap().contains("does not exist"));
         let overlap = t
-            .run(input(DateTimeOperation::Parse, "America/New_York", "2026-11-01T01:30:00"))
+            .run(input(
+                DateTimeOperation::Parse,
+                "America/New_York",
+                "2026-11-01T01:30:00",
+            ))
             .unwrap();
         assert_eq!(overlap.iso.as_deref(), Some("2026-11-01T01:30:00-04:00"));
     }
 
     #[test]
     fn convert_between_zones() {
-        let mut i = input(DateTimeOperation::Convert, "Europe/Brussels", "2026-04-29T15:30:00");
+        let mut i = input(
+            DateTimeOperation::Convert,
+            "Europe/Brussels",
+            "2026-04-29T15:30:00",
+        );
         i.target_timezone = Some("America/New_York".into());
         let out = tool().run(i).unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-04-29T09:30:00-04:00"));
@@ -611,7 +670,11 @@ mod tests {
         assert_eq!(out.human.as_deref(), Some("Wed, 29 Apr 2026 09:30 EDT"));
 
         let missing = tool()
-            .run(input(DateTimeOperation::Convert, "UTC", "2026-04-29T15:30:00"))
+            .run(input(
+                DateTimeOperation::Convert,
+                "UTC",
+                "2026-04-29T15:30:00",
+            ))
             .unwrap();
         assert!(missing.error.unwrap().contains("target_timezone"));
     }
@@ -628,22 +691,38 @@ mod tests {
     #[test]
     fn shift_subday_is_elapsed_time_across_dst() {
         // New York springs forward at 02:00 on 2026-03-08.
-        let mut hours = input(DateTimeOperation::Shift, "America/New_York", "2026-03-07T12:00:00");
+        let mut hours = input(
+            DateTimeOperation::Shift,
+            "America/New_York",
+            "2026-03-07T12:00:00",
+        );
         hours.hours = 24;
         let out = tool().run(hours).unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-03-08T13:00:00-04:00"));
 
-        let mut days = input(DateTimeOperation::Shift, "America/New_York", "2026-03-07T12:00:00");
+        let mut days = input(
+            DateTimeOperation::Shift,
+            "America/New_York",
+            "2026-03-07T12:00:00",
+        );
         days.days = 1;
         let out = tool().run(days).unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-03-08T12:00:00-04:00"));
 
-        let mut mins = input(DateTimeOperation::Shift, "America/New_York", "2026-03-08T01:30:00");
+        let mut mins = input(
+            DateTimeOperation::Shift,
+            "America/New_York",
+            "2026-03-08T01:30:00",
+        );
         mins.minutes = 60;
         let out = tool().run(mins).unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-03-08T03:30:00-04:00"));
 
-        let mut secs = input(DateTimeOperation::Shift, "America/New_York", "2026-11-01T00:30:00");
+        let mut secs = input(
+            DateTimeOperation::Shift,
+            "America/New_York",
+            "2026-11-01T00:30:00",
+        );
         secs.seconds = 3600 * 2;
         let out = tool().run(secs).unwrap();
         // 00:30 EDT + 2h elapsed = 01:30 EST (clocks fell back once).
@@ -652,7 +731,11 @@ mod tests {
 
     #[test]
     fn shift_calendar_day_into_gap_is_normalised() {
-        let mut i = input(DateTimeOperation::Shift, "America/New_York", "2026-03-07T02:30:00");
+        let mut i = input(
+            DateTimeOperation::Shift,
+            "America/New_York",
+            "2026-03-07T02:30:00",
+        );
         i.days = 1;
         let out = tool().run(i).unwrap();
         assert_eq!(out.iso.as_deref(), Some("2026-03-08T03:30:00-04:00"));
@@ -668,7 +751,11 @@ mod tests {
 
     #[test]
     fn diff_counts_elapsed_time_across_dst() {
-        let mut i = input(DateTimeOperation::Diff, "America/New_York", "2026-03-08T00:00:00");
+        let mut i = input(
+            DateTimeOperation::Diff,
+            "America/New_York",
+            "2026-03-08T00:00:00",
+        );
         i.input_2 = Some("2026-03-09T00:00:00".into());
         let out = tool().run(i).unwrap();
         assert_eq!(out.diff_seconds, Some(82_800.0));
@@ -681,12 +768,20 @@ mod tests {
         let mut i = input(DateTimeOperation::Diff, "UTC", "2026-04-29T15:30:00Z");
         i.input_2 = Some("2026-05-02T18:45:00Z".into());
         let out = tool().run(i).unwrap();
-        assert_eq!(out.diff_human.as_deref(), Some("3 days, 3 hours, 15 minutes"));
+        assert_eq!(
+            out.diff_human.as_deref(),
+            Some("3 days, 3 hours, 15 minutes")
+        );
         let mut r = input(DateTimeOperation::Diff, "UTC", "2026-05-02T18:45:00Z");
         r.input_2 = Some("2026-04-29T15:30:00Z".into());
         let out = tool().run(r).unwrap();
-        assert_eq!(out.diff_human.as_deref(), Some("-3 days, 3 hours, 15 minutes"));
-        let missing = tool().run(input(DateTimeOperation::Diff, "UTC", "2026-04-29")).unwrap();
+        assert_eq!(
+            out.diff_human.as_deref(),
+            Some("-3 days, 3 hours, 15 minutes")
+        );
+        let missing = tool()
+            .run(input(DateTimeOperation::Diff, "UTC", "2026-04-29"))
+            .unwrap();
         assert!(missing.error.unwrap().contains("input_2"));
     }
 
@@ -694,6 +789,9 @@ mod tests {
     fn humanize_edge_cases() {
         assert_eq!(DateTimeTool::humanize_seconds(1), "1 second");
         assert_eq!(DateTimeTool::humanize_seconds(3600), "1 hour");
-        assert_eq!(DateTimeTool::humanize_seconds(86_400 + 60), "1 day, 1 minute");
+        assert_eq!(
+            DateTimeTool::humanize_seconds(86_400 + 60),
+            "1 day, 1 minute"
+        );
     }
 }

@@ -87,7 +87,13 @@ impl TokenCounter {
             m if m.contains("gpt-4-turbo") => Some(128_000),
             m if m.contains("gpt-4") => Some(8_192),
             m if m.contains("gpt-3.5-turbo") => Some(16_385),
-            m if m.contains("claude-3") || m.contains("claude-sonnet") || m.contains("claude-opus") || m.contains("claude-haiku") => Some(200_000),
+            m if m.contains("claude-3")
+                || m.contains("claude-sonnet")
+                || m.contains("claude-opus")
+                || m.contains("claude-haiku") =>
+            {
+                Some(200_000)
+            }
             m if m.contains("gemini-2") => Some(1_048_576),
             m if m.contains("gemini-1.5") => Some(1_048_576),
             m if m.contains("gemini-1.0") => Some(32_768),
@@ -114,7 +120,8 @@ impl TokenCounter {
             Self::count_messages(model, system_messages)?
         };
 
-        let mut history = Self::history_framing(!system_messages.is_empty(), history_messages.len());
+        let mut history =
+            Self::history_framing(!system_messages.is_empty(), history_messages.len());
         for msg in history_messages {
             history += Self::count_message(model, msg)?;
         }

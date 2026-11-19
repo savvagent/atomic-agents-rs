@@ -105,9 +105,8 @@ impl SystemPromptGenerator {
     pub fn with_output_instructions(mut self, instructions: Vec<String>) -> Self {
         self.output_instructions = instructions;
         // Always append the standard instructions
-        self.output_instructions.push(
-            "Always respond using the proper JSON schema.".to_string(),
-        );
+        self.output_instructions
+            .push("Always respond using the proper JSON schema.".to_string());
         self.output_instructions.push(
             "Always use the available additional information and context to enhance the response."
                 .to_string(),
@@ -235,11 +234,10 @@ mod tests {
 
     #[test]
     fn test_steps() {
-        let spg = SystemPromptGenerator::new()
-            .with_steps(vec![
-                "Analyze the input.".to_string(),
-                "Generate a response.".to_string(),
-            ]);
+        let spg = SystemPromptGenerator::new().with_steps(vec![
+            "Analyze the input.".to_string(),
+            "Generate a response.".to_string(),
+        ]);
         let prompt = spg.generate_prompt();
         assert!(prompt.contains("INTERNAL ASSISTANT STEPS"));
         assert!(prompt.contains("Analyze the input"));

@@ -91,10 +91,19 @@ impl WebpageScraperTool {
         }
     }
 
-    async fn scrape(&self, url: &str, include_links: bool) -> std::result::Result<WebpageScraperOutput, Error> {
+    async fn scrape(
+        &self,
+        url: &str,
+        include_links: bool,
+    ) -> std::result::Result<WebpageScraperOutput, Error> {
         let mut response = self
             .guard
-            .get(url, &self.user_agent, "text/html,application/xhtml+xml,*/*;q=0.8", self.timeout)
+            .get(
+                url,
+                &self.user_agent,
+                "text/html,application/xhtml+xml,*/*;q=0.8",
+                self.timeout,
+            )
             .await
             .map_err(|e| Error::Validation(format!("Failed to fetch URL: {e}")))?;
 
@@ -108,7 +117,10 @@ impl WebpageScraperTool {
             .map(str::to_owned);
 
         // Stream the body so oversized responses are rejected without buffering them fully.
-        if response.content_length().is_some_and(|l| l > self.max_content_length as u64) {
+        if response
+            .content_length()
+            .is_some_and(|l| l > self.max_content_length as u64)
+        {
             return Err(too_large(self.max_content_length));
         }
         let mut body: Vec<u8> = Vec::new();
@@ -245,7 +257,9 @@ fn too_large(max: usize) -> Error {
 
 /// Resolves `href` against `base`, falling back to the raw value when it cannot be parsed.
 fn resolve_href(base: &url::Url, href: &str) -> String {
-    base.join(href.trim()).map(String::from).unwrap_or_else(|_| href.to_string())
+    base.join(href.trim())
+        .map(String::from)
+        .unwrap_or_else(|_| href.to_string())
 }
 
 /// Extracts text from an HTML element, optionally preserving links.
@@ -253,7 +267,12 @@ fn resolve_href(base: &url::Url, href: &str) -> String {
 /// Links are resolved against `base`. `header`/`footer` elements nested inside
 /// `main`/`article`/`section` are kept (they hold headings and attribution);
 /// page-level ones are dropped. `in_section` tracks that nesting.
-fn extract_text(element: scraper::ElementRef, include_links: bool, base: &url::Url, in_section: bool) -> String {
+fn extract_text(
+    element: scraper::ElementRef,
+    include_links: bool,
+    base: &url::Url,
+    in_section: bool,
+) -> String {
     let mut text = String::new();
     // Remove script and style elements by skipping them
     let skip_tags = ["script", "style", "noscript", "nav"];
@@ -280,7 +299,11 @@ fn extract_text(element: scraper::ElementRef, include_links: bool, base: &url::U
                     if include_links && tag == "a" {
                         if let Some(href) = el.attr("href") {
                             if !child_text.trim().is_empty() {
-                                text.push_str(&format!("[{}]({})", child_text.trim(), resolve_href(base, href)));
+                                text.push_str(&format!(
+                                    "[{}]({})",
+                                    child_text.trim(),
+                                    resolve_href(base, href)
+                                ));
                                 text.push(' ');
                                 continue;
                             }
@@ -292,8 +315,17 @@ fn extract_text(element: scraper::ElementRef, include_links: bool, base: &url::U
                     // Add newlines after block elements
                     if matches!(
                         tag,
-                        "p" | "div" | "br" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                            | "li" | "tr" | "blockquote"
+                        "p" | "div"
+                            | "br"
+                            | "h1"
+                            | "h2"
+                            | "h3"
+                            | "h4"
+                            | "h5"
+                            | "h6"
+                            | "li"
+                            | "tr"
+                            | "blockquote"
                     ) {
                         text.push('\n');
                     }
@@ -325,7 +357,10 @@ mod tests {
 
     #[test]
     fn links_resolve_against_final_url() {
-        let out = extract(r#"<body><p><a href="/a/b">x</a> <a href="rel">y</a></p></body>"#, "https://example.com/dir/page");
+        let out = extract(
+            r#"<body><p><a href="/a/b">x</a> <a href="rel">y</a></p></body>"#,
+            "https://example.com/dir/page",
+        );
         assert!(out.contains("[x](https://example.com/a/b)"), "{out}");
         assert!(out.contains("[y](https://example.com/dir/rel)"), "{out}");
     }
@@ -335,7 +370,10 @@ mod tests {
         let html = "<body><header>Site</header><article><header><h1>Title</h1>By Ann</header><p>Body</p><footer>Source X</footer></article><footer>Copyright</footer></body>";
         let out = extract(html, "https://e.com/");
         assert!(!out.contains("Site") && !out.contains("Copyright"), "{out}");
-        assert!(out.contains("Title") && out.contains("By Ann") && out.contains("Source X"), "{out}");
+        assert!(
+            out.contains("Title") && out.contains("By Ann") && out.contains("Source X"),
+            "{out}"
+        );
     }
 }
 
@@ -346,13 +384,19 @@ mod network_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn local_tool() -> WebpageScraperTool {
-        WebpageScraperTool::new(WebpageScraperConfig { allow_private_hosts: true, ..Default::default() })
+        WebpageScraperTool::new(WebpageScraperConfig {
+            allow_private_hosts: true,
+            ..Default::default()
+        })
     }
 
     #[tokio::test]
     async fn default_config_rejects_private_hosts() {
         let tool = WebpageScraperTool::default();
-        for url in ["http://127.0.0.1/", "http://169.254.169.254/latest/meta-data"] {
+        for url in [
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data",
+        ] {
             let err = tool.scrape(url, true).await.unwrap_err().to_string();
             assert!(err.contains("non-public"), "{url}: {err}");
         }
@@ -366,46 +410,76 @@ mod network_tests {
             .mount(&server)
             .await;
         Mock::given(wiremock::matchers::path("/dir/final"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(r#"<body><a href="rel">x</a></body>"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"<body><a href="rel">x</a></body>"#),
+            )
             .mount(&server)
             .await;
-        let out = local_tool().scrape(&format!("{}/start", server.uri()), true).await.unwrap();
-        assert!(out.content.contains(&format!("[x]({}/dir/rel)", server.uri())), "{}", out.content);
+        let out = local_tool()
+            .scrape(&format!("{}/start", server.uri()), true)
+            .await
+            .unwrap();
+        assert!(
+            out.content
+                .contains(&format!("[x]({}/dir/rel)", server.uri())),
+            "{}",
+            out.content
+        );
     }
 
     #[test]
     fn decodes_using_content_type_charset() {
         // "café" in ISO-8859-1 / windows-1252.
         let body = b"<p>caf\xe9</p>";
-        assert_eq!(decode_body(body, Some("text/html; charset=ISO-8859-1")), "<p>café</p>");
-        assert_eq!(decode_body(body, Some("text/html; Charset=\"windows-1252\"")), "<p>café</p>");
+        assert_eq!(
+            decode_body(body, Some("text/html; charset=ISO-8859-1")),
+            "<p>café</p>"
+        );
+        assert_eq!(
+            decode_body(body, Some("text/html; Charset=\"windows-1252\"")),
+            "<p>café</p>"
+        );
     }
 
     #[test]
     fn decodes_using_meta_charset_when_header_lacks_one() {
         let body = b"<html><head><meta charset=\"windows-1252\"></head><p>caf\xe9</p></html>";
         assert!(decode_body(body, Some("text/html")).contains("café"));
-        let body = b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=shift_jis\">\x82\xa0";
+        let body =
+            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=shift_jis\">\x82\xa0";
         assert!(decode_body(body, None).ends_with('あ'));
     }
 
     #[test]
     fn defaults_to_utf8_and_honours_bom() {
         assert_eq!(decode_body("café".as_bytes(), None), "café");
-        assert_eq!(decode_body(b"caf\xe9", Some("text/html; charset=bogus")), "caf\u{fffd}");
+        assert_eq!(
+            decode_body(b"caf\xe9", Some("text/html; charset=bogus")),
+            "caf\u{fffd}"
+        );
         let mut bom = vec![0xEF, 0xBB, 0xBF];
         bom.extend_from_slice("café".as_bytes());
-        assert_eq!(decode_body(&bom, Some("text/html; charset=ISO-8859-1")), "café");
+        assert_eq!(
+            decode_body(&bom, Some("text/html; charset=ISO-8859-1")),
+            "café"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn oversized_body_is_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(format!("<html><body>{}</body></html>", "a".repeat(500))))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("<html><body>{}</body></html>", "a".repeat(500))),
+            )
             .mount(&server)
             .await;
-        let cfg = WebpageScraperConfig { max_content_length: 100, allow_private_hosts: true, ..Default::default() };
+        let cfg = WebpageScraperConfig {
+            max_content_length: 100,
+            allow_private_hosts: true,
+            ..Default::default()
+        };
         let tool = WebpageScraperTool::new(cfg);
         assert!(tool.scrape(&server.uri(), true).await.is_err());
 

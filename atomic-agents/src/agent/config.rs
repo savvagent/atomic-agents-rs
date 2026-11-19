@@ -70,7 +70,10 @@ impl<C: LlmClient> AgentConfig<C> {
         self
     }
 
-    pub fn with_system_prompt(mut self, generator: impl BaseSystemPromptGenerator + 'static) -> Self {
+    pub fn with_system_prompt(
+        mut self,
+        generator: impl BaseSystemPromptGenerator + 'static,
+    ) -> Self {
         self.system_prompt_generator = Some(Box::new(generator));
         self
     }

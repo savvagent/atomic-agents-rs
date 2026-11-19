@@ -47,9 +47,7 @@ impl App {
         match &self.active_screen {
             ActiveScreen::MainMenu => self.main_menu.render(frame, frame.area()),
             ActiveScreen::ToolExplorer => self.tool_explorer.render(frame, frame.area()),
-            ActiveScreen::FileExplorer { .. } => {
-                self.file_explorer.render(frame, frame.area())
-            }
+            ActiveScreen::FileExplorer { .. } => self.file_explorer.render(frame, frame.area()),
             ActiveScreen::ToolInfo { .. } => self.tool_info.render(frame, frame.area()),
         }
 
@@ -84,22 +82,19 @@ impl App {
                     Some(crate::screens::tool_explorer::ExplorerAction::Back) => {
                         self.active_screen = ActiveScreen::MainMenu;
                     }
-                    Some(crate::screens::tool_explorer::ExplorerAction::SelectTool(
-                        name,
-                        path,
-                    )) => {
+                    Some(crate::screens::tool_explorer::ExplorerAction::SelectTool(name, path)) => {
                         self.file_explorer.set_mode_directory();
                         self.active_screen = ActiveScreen::FileExplorer {
                             tool_name: name,
                             tool_path: path,
                         };
                     }
-                    Some(crate::screens::tool_explorer::ExplorerAction::ShowInfo(
-                        name,
-                        readme,
-                    )) => {
+                    Some(crate::screens::tool_explorer::ExplorerAction::ShowInfo(name, readme)) => {
                         self.tool_info.set_content(&name, &readme);
-                        self.active_screen = ActiveScreen::ToolInfo { tool_name: name, readme };
+                        self.active_screen = ActiveScreen::ToolInfo {
+                            tool_name: name,
+                            readme,
+                        };
                     }
                     None => {}
                 }
@@ -122,8 +117,7 @@ impl App {
                                 ));
                             }
                             Err(e) => {
-                                self.status_message =
-                                    Some(format!("✗ Failed to copy tool: {e}"));
+                                self.status_message = Some(format!("✗ Failed to copy tool: {e}"));
                             }
                         }
                         self.active_screen = ActiveScreen::ToolExplorer;

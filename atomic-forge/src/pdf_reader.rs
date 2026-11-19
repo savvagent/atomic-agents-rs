@@ -184,7 +184,10 @@ impl PdfReaderTool {
     /// assert_eq!(PdfReaderTool::parse_page_range("8-20", 10).unwrap(), vec![8, 9, 10]);
     /// assert!(PdfReaderTool::parse_page_range("0", 10).is_err());
     /// ```
-    pub fn parse_page_range(expression: &str, total_pages: usize) -> std::result::Result<Vec<u32>, String> {
+    pub fn parse_page_range(
+        expression: &str,
+        total_pages: usize,
+    ) -> std::result::Result<Vec<u32>, String> {
         let text = expression.trim();
         if text.is_empty() {
             return Err("page_range cannot be empty when provided.".to_string());
@@ -282,7 +285,9 @@ impl PdfReaderTool {
                 .canonicalize()
                 .map_err(|e| format!("Failed to resolve '{source}': {e}"))?;
             if !real.starts_with(&dir) {
-                return Err(format!("Access denied: '{source}' is outside the allowed directory."));
+                return Err(format!(
+                    "Access denied: '{source}' is outside the allowed directory."
+                ));
             }
             Some((dir, real))
         } else {
@@ -307,7 +312,9 @@ impl PdfReaderTool {
             let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
                 .map_err(|e| format!("Failed to verify '{source}': {e}"))?;
             if !opened.starts_with(dir) {
-                return Err(format!("Access denied: '{source}' is outside the allowed directory."));
+                return Err(format!(
+                    "Access denied: '{source}' is outside the allowed directory."
+                ));
             }
         }
         let mut data = Vec::new();
@@ -380,7 +387,9 @@ impl PdfReaderTool {
     ) -> std::result::Result<PdfReaderOutput, String> {
         let doc = Document::load_mem(data).map_err(|e| format!("Failed to parse PDF: {e}"))?;
         if doc.is_encrypted() {
-            return Err("PDF is encrypted and could not be decrypted without a password.".to_string());
+            return Err(
+                "PDF is encrypted and could not be decrypted without a password.".to_string(),
+            );
         }
         let page_ids = doc.get_pages();
         let total = page_ids.len();
@@ -614,7 +623,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_local_file() {
-        let path = std::env::temp_dir().join(format!("atomic_forge_pdf_{}.pdf", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("atomic_forge_pdf_{}.pdf", std::process::id()));
         std::fs::write(&path, sample_pdf(&["From disk"])).unwrap();
         let tool = PdfReaderTool::new(PdfReaderConfig::default());
         let out = tool.run(input(path.to_str().unwrap())).unwrap();
@@ -644,7 +654,9 @@ mod tests {
             max_size_bytes: 10,
             ..Default::default()
         });
-        let out = small.run(input(&format!("{}/a.pdf", server.uri()))).unwrap();
+        let out = small
+            .run(input(&format!("{}/a.pdf", server.uri())))
+            .unwrap();
         assert!(out.error.unwrap().contains("too large"));
     }
 
@@ -674,13 +686,16 @@ mod tests {
         let tool = PdfReaderTool::new(PdfReaderConfig::default());
         let out = tool.run(input(&format!("{}/a.pdf", server.uri()))).unwrap();
         assert!(out.error.unwrap().contains("non-public"));
-        let meta = tool.run(input("http://169.254.169.254/latest/meta-data")).unwrap();
+        let meta = tool
+            .run(input("http://169.254.169.254/latest/meta-data"))
+            .unwrap();
         assert!(meta.error.unwrap().contains("non-public"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn allowed_dir_blocks_escape() {
-        let base = std::env::temp_dir().join(format!("atomic_forge_pdf_dir_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("atomic_forge_pdf_dir_{}", std::process::id()));
         let allowed = base.join("allowed");
         std::fs::create_dir_all(&allowed).unwrap();
         std::fs::write(allowed.join("ok.pdf"), sample_pdf(&["Inside"])).unwrap();
@@ -689,7 +704,9 @@ mod tests {
             allowed_dir: Some(allowed.clone()),
             ..Default::default()
         });
-        let ok = tool.run(input(allowed.join("ok.pdf").to_str().unwrap())).unwrap();
+        let ok = tool
+            .run(input(allowed.join("ok.pdf").to_str().unwrap()))
+            .unwrap();
         assert!(ok.error.is_none(), "{:?}", ok.error);
         let escape = format!("{}/../secret.pdf", allowed.display());
         let out = tool.run(input(&escape)).unwrap();
@@ -700,7 +717,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn allowed_dir_blocks_symlink_escape() {
-        let base = std::env::temp_dir().join(format!("atomic_forge_pdf_link_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("atomic_forge_pdf_link_{}", std::process::id()));
         let allowed = base.join("allowed");
         std::fs::create_dir_all(&allowed).unwrap();
         std::fs::write(base.join("secret.pdf"), sample_pdf(&["Outside"])).unwrap();
@@ -711,12 +729,19 @@ mod tests {
             ..Default::default()
         });
         for name in ["link.pdf", "linkdir/secret.pdf"] {
-            let out = tool.run(input(allowed.join(name).to_str().unwrap())).unwrap();
-            assert!(out.error.unwrap().contains("outside the allowed directory"), "{name}");
+            let out = tool
+                .run(input(allowed.join(name).to_str().unwrap()))
+                .unwrap();
+            assert!(
+                out.error.unwrap().contains("outside the allowed directory"),
+                "{name}"
+            );
         }
         // A directory inside the sandbox is not a regular file.
         std::fs::create_dir(allowed.join("sub.pdf")).unwrap();
-        let out = tool.run(input(allowed.join("sub.pdf").to_str().unwrap())).unwrap();
+        let out = tool
+            .run(input(allowed.join("sub.pdf").to_str().unwrap()))
+            .unwrap();
         assert!(out.error.unwrap().contains("not a file"));
         std::fs::remove_dir_all(&base).ok();
     }

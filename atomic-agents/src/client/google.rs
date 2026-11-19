@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use reqwest::Client;
 
-use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use super::LlmClient;
+use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use crate::error::{ClientError, Error};
 
 /// Client for Google Gemini (Generative Language API).
@@ -111,8 +111,8 @@ impl GoogleClient {
         let mut generation_config = serde_json::json!({});
         for (k, v) in &request.extra {
             match k.as_str() {
-                "temperature" | "top_p" | "top_k" | "max_output_tokens"
-                | "candidate_count" | "stop_sequences" => {
+                "temperature" | "top_p" | "top_k" | "max_output_tokens" | "candidate_count"
+                | "stop_sequences" => {
                     generation_config[k] = v.clone();
                 }
                 _ => {
@@ -133,10 +133,7 @@ impl GoogleClient {
         } else {
             "generateContent"
         };
-        format!(
-            "{}/models/{}:{}",
-            self.base_url, model, method
-        )
+        format!("{}/models/{}:{}", self.base_url, model, method)
     }
 }
 
@@ -176,8 +173,7 @@ impl LlmClient for GoogleClient {
             }));
         }
 
-        let response_json: serde_json::Value =
-            response.json().await.map_err(ClientError::Http)?;
+        let response_json: serde_json::Value = response.json().await.map_err(ClientError::Http)?;
 
         // Extract content from Gemini response
         let content = extract_gemini_content(&response_json);
@@ -256,9 +252,7 @@ impl LlmClient for GoogleClient {
 }
 
 fn extract_gemini_content(response: &serde_json::Value) -> String {
-    let candidate = response
-        .get("candidates")
-        .and_then(|c| c.get(0));
+    let candidate = response.get("candidates").and_then(|c| c.get(0));
 
     let parts = candidate
         .and_then(|c| c.get("content"))
@@ -319,9 +313,7 @@ where
                     this.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(Error::Client(
-                        ClientError::Http(e),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
                     if let Some(chunk) = parse_gemini_sse(&mut this.buffer) {

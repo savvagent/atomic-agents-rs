@@ -7,12 +7,10 @@ use crate::pipeline::MergeStrategy;
 pub fn merge_values(strategy: &MergeStrategy, inputs: Vec<Value>) -> Result<Value> {
     match strategy {
         MergeStrategy::WaitAll => Ok(Value::Array(inputs)),
-        MergeStrategy::FirstReady => {
-            inputs
-                .into_iter()
-                .next()
-                .ok_or_else(|| Error::Pipeline("No inputs to merge".to_string()))
-        }
+        MergeStrategy::FirstReady => inputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Pipeline("No inputs to merge".to_string())),
         MergeStrategy::MergeObjects => {
             let mut merged = serde_json::Map::new();
             for input in inputs {

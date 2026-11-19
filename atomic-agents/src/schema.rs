@@ -58,9 +58,7 @@ pub trait IOSchema:
 /// Default input schema for basic chat agents.
 ///
 /// Mirrors Python's `BasicChatInputSchema`.
-#[derive(
-    Clone, Debug, Serialize, serde::Deserialize, JsonSchema,
-)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, JsonSchema)]
 pub struct BasicChatInputSchema {
     /// The chat message from the user.
     pub chat_message: String,
@@ -79,9 +77,7 @@ impl IOSchema for BasicChatInputSchema {
 /// Default output schema for basic chat agents.
 ///
 /// Mirrors Python's `BasicChatOutputSchema`.
-#[derive(
-    Clone, Debug, Serialize, serde::Deserialize, JsonSchema,
-)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, JsonSchema)]
 pub struct BasicChatOutputSchema {
     /// The chat message response. Supports markdown formatting.
     pub chat_message: String,

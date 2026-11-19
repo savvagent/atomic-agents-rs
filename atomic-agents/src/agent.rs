@@ -9,10 +9,10 @@ use std::sync::Mutex;
 use futures::stream::Stream;
 
 use crate::chat_history::{BaseChatHistory, ChatHistory, ContentPart, Role};
+use crate::client::LlmClient;
 use crate::client::types::{
     ChatMessage, ChatRequest, FunctionDefinition, ResponseFormat, ToolDefinition,
 };
-use crate::client::LlmClient;
 use crate::error::{Error, Result};
 use crate::schema::IOSchema;
 use crate::system_prompt::{BaseSystemPromptGenerator, ContextProvider, SystemPromptGenerator};
@@ -409,10 +409,9 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
             let mut messages = self.counted_history(history.as_ref(), model)?;
             let outcome;
             loop {
-                let history_tokens = TokenCounter::history_framing(
-                    !system_messages.is_empty(),
-                    messages.len(),
-                ) + messages.iter().map(|(_, c)| c).sum::<usize>();
+                let history_tokens =
+                    TokenCounter::history_framing(!system_messages.is_empty(), messages.len())
+                        + messages.iter().map(|(_, c)| c).sum::<usize>();
                 let total = system_prompt + history_tokens + tools;
                 if total <= max {
                     outcome = Ok(());
@@ -447,7 +446,9 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
                 let mut old = messages.into_iter().peekable();
                 for msg in remaining {
                     while let Some((m, _)) = old.peek() {
-                        if m.role == msg.role && m.content == token_count_content(msg.content.clone()) {
+                        if m.role == msg.role
+                            && m.content == token_count_content(msg.content.clone())
+                        {
                             break;
                         }
                         old.next();
@@ -458,11 +459,14 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
                 }
                 messages = kept;
             }
-            let history_tokens = TokenCounter::history_framing(
-                !system_messages.is_empty(),
-                messages.len(),
-            ) + messages.iter().map(|(_, c)| c).sum::<usize>();
-            (outcome, system_prompt + history_tokens + tools, history_tokens)
+            let history_tokens =
+                TokenCounter::history_framing(!system_messages.is_empty(), messages.len())
+                    + messages.iter().map(|(_, c)| c).sum::<usize>();
+            (
+                outcome,
+                system_prompt + history_tokens + tools,
+                history_tokens,
+            )
         };
 
         let (outcome, total, history_tokens) = outcome;
@@ -658,18 +662,23 @@ fn token_count_content(content: serde_json::Value) -> serde_json::Value {
     };
     let text = parts
         .iter()
-        .map(|part| match serde_json::from_value::<ContentPart>(part.clone()) {
-            Ok(ContentPart::Text { text }) => text,
-            Ok(ContentPart::ImageUrl { .. } | ContentPart::ImageBase64 { .. }) => {
-                "[image content]".to_string()
-            }
-            Ok(ContentPart::AudioBase64 { .. }) => "[audio content]".to_string(),
-            Ok(ContentPart::VideoUrl { .. }) => "[video content]".to_string(),
-            Err(_) => {
-                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
-                format!("[{kind} content]")
-            }
-        })
+        .map(
+            |part| match serde_json::from_value::<ContentPart>(part.clone()) {
+                Ok(ContentPart::Text { text }) => text,
+                Ok(ContentPart::ImageUrl { .. } | ContentPart::ImageBase64 { .. }) => {
+                    "[image content]".to_string()
+                }
+                Ok(ContentPart::AudioBase64 { .. }) => "[audio content]".to_string(),
+                Ok(ContentPart::VideoUrl { .. }) => "[video content]".to_string(),
+                Err(_) => {
+                    let kind = part
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("unknown");
+                    format!("[{kind} content]")
+                }
+            },
+        )
         .collect::<Vec<_>>()
         .join("\n");
     serde_json::Value::String(text)
@@ -805,8 +814,7 @@ mod tests {
         });
         let client = MockClient::new(response_json.to_string());
         let config = AgentConfig::new(client, "test-model");
-        let agent =
-            AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
         let result = agent
             .run_async(Some(BasicChatInputSchema {
@@ -825,8 +833,7 @@ mod tests {
         });
         let client = MockClient::new(response_json.to_string());
         let config = AgentConfig::new(client, "test-model");
-        let agent =
-            AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
         agent
             .run_async(Some(BasicChatInputSchema {
@@ -847,8 +854,7 @@ mod tests {
         });
         let client = MockClient::new(response_json.to_string());
         let config = AgentConfig::new(client, "test-model");
-        let agent =
-            AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
         agent
             .run_async(Some(BasicChatInputSchema {
@@ -866,8 +872,7 @@ mod tests {
     async fn test_agent_extraction_failure_retries() {
         let client = MockClient::new("not valid json");
         let config = AgentConfig::new(client, "test-model").with_max_retries(1);
-        let agent =
-            AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
         let result = agent
             .run_async(Some(BasicChatInputSchema {
@@ -886,14 +891,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_hooks() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let response_json = serde_json::json!({"chat_message": "hi"});
         let client = MockClient::new(response_json.to_string());
         let config = AgentConfig::new(client, "test-model");
-        let agent =
-            AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
@@ -990,15 +994,28 @@ mod tests {
         // Budget that fits the prompt, tools and roughly one turn, not four.
         let one_turn = {
             let fresh = ok_agent();
-            fresh.run_async(Some(input("older message 0"))).await.unwrap();
+            fresh
+                .run_async(Some(input("older message 0")))
+                .await
+                .unwrap();
             fresh.get_context_token_count().unwrap().total
         };
         let mut agent = agent;
         agent.max_context_tokens = Some(one_turn + 5);
 
-        agent.run_async(Some(input("the newest message"))).await.unwrap();
+        agent
+            .run_async(Some(input("the newest message")))
+            .await
+            .unwrap();
 
-        let sent = agent.client.requests.lock().unwrap().last().unwrap().clone();
+        let sent = agent
+            .client
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
         let sent_text = serde_json::to_string(&sent.messages).unwrap();
         assert!(sent_text.contains("the newest message"));
         assert!(!sent_text.contains("older message 0"));
@@ -1113,8 +1130,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_dropped_after_complete_output_commits_turn() {
-        let client = MockClient::new("")
-            .with_stream_chunks(&[r#"{"chat_"#, r#"message": "x"}"#, "  "]);
+        let client =
+            MockClient::new("").with_stream_chunks(&[r#"{"chat_"#, r#"message": "x"}"#, "  "]);
         let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(
             AgentConfig::new(client, "gpt-4o"),
         );
@@ -1140,7 +1157,11 @@ mod tests {
                 break;
             }
             let current = copy.current_turn_id().map(str::to_string);
-            match copy.turn_ids().into_iter().find(|id| Some(id) != current.as_ref()) {
+            match copy
+                .turn_ids()
+                .into_iter()
+                .find(|id| Some(id) != current.as_ref())
+            {
                 Some(id) => copy.delete_turn(&id),
                 None => break,
             }
@@ -1157,14 +1178,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_trim_context_matches_naive_recount_and_fires_hook_once() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let client = MockClient::new(r#"{"chat_message": "ok"}"#);
         let agent = TestAgent::new(AgentConfig::new(client, "gpt-4o"));
         for i in 0..5 {
             agent
-                .run_async(Some(input(&format!("a fairly long older message number {i}"))))
+                .run_async(Some(input(&format!(
+                    "a fairly long older message number {i}"
+                ))))
                 .await
                 .unwrap();
         }
@@ -1179,10 +1202,11 @@ mod tests {
             ));
             *candidate.history.lock().unwrap() = probe;
             candidate.max_context_tokens = Some(budget);
-            candidate.history.lock().unwrap().add_raw_message(
-                Role::User,
-                MessageContent::text("newest"),
-            );
+            candidate
+                .history
+                .lock()
+                .unwrap()
+                .add_raw_message(Role::User, MessageContent::text("newest"));
             let expected = naive_trimmed_ids(&candidate, budget);
 
             let fired = Arc::new(AtomicUsize::new(0));
@@ -1194,7 +1218,10 @@ mod tests {
                 }),
             );
             let result = candidate.trim_context();
-            assert_eq!(result.is_ok(), expected.len() > 1 || naive_fits(&candidate, budget));
+            assert_eq!(
+                result.is_ok(),
+                expected.len() > 1 || naive_fits(&candidate, budget)
+            );
             trimmed_any |= candidate.history().turn_ids().len() < 6;
             assert_eq!(candidate.history().turn_ids(), expected, "budget {budget}");
             assert_eq!(fired.load(Ordering::SeqCst), 1);
@@ -1275,8 +1302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_with_aliased_output_fields() {
-        let client = MockClient::new("")
-            .with_stream_chunks(&[r#"{"repl"#, r#"y": "aliased"}"#]);
+        let client = MockClient::new("").with_stream_chunks(&[r#"{"repl"#, r#"y": "aliased"}"#]);
         let agent = AtomicAgent::<BasicChatInputSchema, AliasedOutput, _>::new(AgentConfig::new(
             client, "gpt-4o",
         ));
@@ -1330,8 +1356,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_system_prompt_generator() {
-        let config =
-            AgentConfig::new(MockClient::new(r#"{"chat_message": "ok"}"#), "m").with_system_prompt(FixedPrompt);
+        let config = AgentConfig::new(MockClient::new(r#"{"chat_message": "ok"}"#), "m")
+            .with_system_prompt(FixedPrompt);
         let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
         agent.run_async(Some(input("hi"))).await.unwrap();
         let sent = agent.client.requests.lock().unwrap()[0].clone();
@@ -1355,8 +1381,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_agent_context_token_count_is_additive_and_fires_hook() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let agent = ok_agent();
         let fired = Arc::new(AtomicUsize::new(0));
@@ -1381,8 +1407,8 @@ mod tests {
 
     #[test]
     fn test_token_hook_is_local_and_respects_disable() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let agent = ok_agent();
         let fired = Arc::new(AtomicUsize::new(0));

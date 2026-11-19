@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use reqwest::Client;
 
-use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use super::LlmClient;
+use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
 use crate::error::{ClientError, Error};
 
 /// Client for OpenAI-compatible chat completion APIs.
@@ -78,10 +78,12 @@ impl OpenAiClient {
         let choice = response_json
             .get("choices")
             .and_then(|c| c.get(0))
-            .ok_or_else(|| Error::Client(ClientError::Api {
-                status: 0,
-                message: "No choices in response".to_string(),
-            }))?;
+            .ok_or_else(|| {
+                Error::Client(ClientError::Api {
+                    status: 0,
+                    message: "No choices in response".to_string(),
+                })
+            })?;
 
         let message = choice.get("message").ok_or_else(|| {
             Error::Client(ClientError::Api {
@@ -140,17 +142,20 @@ impl LlmClient for OpenAiClient {
             }));
         }
 
-        let response_json: serde_json::Value =
-            response.json().await.map_err(ClientError::Http)?;
+        let response_json: serde_json::Value = response.json().await.map_err(ClientError::Http)?;
 
         let content = Self::extract_content(&response_json)?;
 
         let usage = response_json.get("usage").map(|u| Usage {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64().map(|n| n as u32)),
+            prompt_tokens: u
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
             completion_tokens: u
                 .get("completion_tokens")
                 .and_then(|v| v.as_u64().map(|n| n as u32)),
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64().map(|n| n as u32)),
+            total_tokens: u
+                .get("total_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
         });
 
         let finish_reason = response_json
@@ -243,13 +248,10 @@ where
             let inner = Pin::new(&mut this.inner);
             match inner.poll_next(cx) {
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    this.buffer
-                        .push_str(&String::from_utf8_lossy(&bytes));
+                    this.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(Error::Client(
-                        ClientError::Http(e),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
                     // Check for remaining data in buffer

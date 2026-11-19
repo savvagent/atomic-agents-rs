@@ -35,10 +35,8 @@ pub struct ToolAdapter<T: Tool> {
 
 impl<T: Tool> ToolAdapter<T> {
     pub fn new(tool: T) -> Self {
-        let input_schema =
-            serde_json::to_value(T::Input::generate_schema()).unwrap_or_default();
-        let output_schema =
-            serde_json::to_value(T::Output::generate_schema()).unwrap_or_default();
+        let input_schema = serde_json::to_value(T::Input::generate_schema()).unwrap_or_default();
+        let output_schema = serde_json::to_value(T::Output::generate_schema()).unwrap_or_default();
         Self {
             tool,
             input_schema,
@@ -62,19 +60,18 @@ impl<T: Tool + 'static> DynamicToolRunner for ToolAdapter<T> {
     }
 
     async fn run(&self, input: Value) -> Result<Value> {
-        let typed_input: T::Input = serde_json::from_value(input)
-            .map_err(|e| Error::NodeExecution {
+        let typed_input: T::Input =
+            serde_json::from_value(input).map_err(|e| Error::NodeExecution {
                 node_id: String::new(),
                 message: format!("Failed to deserialize tool input: {e}"),
             })?;
 
         let output = self.tool.run(typed_input).map_err(Error::Agent)?;
 
-        serde_json::to_value(output)
-            .map_err(|e| Error::NodeExecution {
-                node_id: String::new(),
-                message: format!("Failed to serialize tool output: {e}"),
-            })
+        serde_json::to_value(output).map_err(|e| Error::NodeExecution {
+            node_id: String::new(),
+            message: format!("Failed to serialize tool output: {e}"),
+        })
     }
 }
 
