@@ -8,9 +8,8 @@
 //! the real per-tool schemas, and [`McpToolset::dispatch`] runs the call it
 //! picked.
 //!
-//! The schema is deterministic: `serde_json` runs with `preserve_order` under
-//! the `mcp` feature, so `tool_name` stays the first property and tools keep
-//! their discovery order.
+//! Each tool's schema pins `tool_name` to the tool via an `enum` and lists it
+//! first in `required`. Property order carries no meaning in JSON Schema.
 
 use std::collections::HashMap;
 
@@ -70,7 +69,13 @@ impl IOSchema for McpOrchestratorOutput {
 
 /// Builds the orchestrator output schema for `tools`.
 ///
-/// See the module docs. Errors when `tools` is empty, two tools share a name,
+/// See the module docs. The output is deterministic: object keys are sorted
+/// (`serde_json`'s default map), while `anyOf` follows the order of `tools` and
+/// `required` keeps `tool_name` first. The `serde_json/preserve_order` feature
+/// is deliberately not enabled, because feature unification would change map
+/// ordering for every crate in a downstream dependency graph.
+///
+/// Errors when `tools` is empty, two tools share a name,
 /// or a tool already declares a `tool_name` property.
 pub fn orchestrator_schema(tools: &[McpTool]) -> Result<Value> {
     let entries: Vec<(&str, Option<&str>, &Value)> = tools
@@ -345,14 +350,7 @@ mod tests {
             .unwrap();
         assert_eq!(any_of.len(), 2);
         for (variant, name) in any_of.iter().zip(["add", "echo"]) {
-            let first = variant["properties"]
-                .as_object()
-                .unwrap()
-                .iter()
-                .next()
-                .unwrap();
-            assert_eq!(first.0, "tool_name");
-            assert_eq!(first.1["enum"], json!([name]));
+            assert_eq!(variant["properties"]["tool_name"]["enum"], json!([name]));
             assert_eq!(variant["required"][0], json!("tool_name"));
             assert_eq!(variant["title"], json!(name));
             assert_eq!(variant["type"], json!("object"));
