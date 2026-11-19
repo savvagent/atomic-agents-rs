@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use rmcp::RoleClient;
 use rmcp::model::{
@@ -19,11 +20,15 @@ use super::prompt::{McpPrompt, McpPromptOutput};
 use super::resource::{McpResource, McpResourceOutput};
 use super::result::extract_tool_result;
 use super::tool::McpTool;
-use super::transport::{McpTransport, McpTransportType, UrlScrubber, connect_transport};
+use super::transport::{McpTransport, McpTransportType, UrlScrubber, connect_transport, secs};
 use crate::error::{Error, Result};
 
 /// How long [`McpClient::close`] waits for the session to shut down.
-const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Most pages a list request may span before it is treated as runaway
+/// pagination.
+const MAX_PAGES: usize = 1000;
 
 /// One initialised MCP session.
 ///
@@ -35,6 +40,11 @@ const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Discovery is gated by the server's advertised capabilities: a server that
 /// does not advertise `resources` or `prompts` never receives the
 /// corresponding list request, and the method returns an empty list.
+///
+/// Every request (each page of a list, a tool call, a resource read, a
+/// prompt render) is bounded by the transport's
+/// [request timeout](McpTransport::with_request_timeout). A request that
+/// times out is abandoned and returns an error; the session stays usable.
 #[derive(Clone)]
 pub struct McpClient {
     inner: Arc<Inner>,
@@ -45,6 +55,7 @@ struct Inner {
     info: Arc<ServerPeerInfo>,
     closed: AtomicBool,
     scrubber: UrlScrubber,
+    request_timeout: Duration,
     service: tokio::sync::Mutex<Option<RunningService<RoleClient, ClientConfig>>>,
 }
 
@@ -52,6 +63,7 @@ impl McpClient {
     /// Connects over `transport` and completes the initialize handshake.
     pub async fn connect(transport: McpTransport) -> Result<Self> {
         let scrubber = transport.scrubber();
+        let request_timeout = transport.request_timeout();
         let service = connect_transport(&transport).await?;
         let info = service.peer_info().ok_or_else(|| {
             Error::Mcp("MCP server did not complete the initialize handshake".to_string())
@@ -62,6 +74,7 @@ impl McpClient {
                 info,
                 closed: AtomicBool::new(false),
                 scrubber,
+                request_timeout,
                 service: tokio::sync::Mutex::new(Some(service)),
             }),
         })
@@ -102,7 +115,7 @@ impl McpClient {
         if self.server_capabilities().tools.is_none() {
             return Ok(Vec::new());
         }
-        let tools = collect_pages("tools/list", &self.inner.scrubber, |cursor| async move {
+        let tools = collect_pages("tools/list", self.pager(), |cursor| async move {
             let page = peer.list_tools(page_params(cursor)).await?;
             Ok((page.tools, page.next_cursor))
         })
@@ -129,18 +142,14 @@ impl McpClient {
         if self.server_capabilities().resources.is_none() {
             return Ok(Vec::new());
         }
-        let resources = collect_pages(
-            "resources/list",
-            &self.inner.scrubber,
-            |cursor| async move {
-                let page = peer.list_resources(page_params(cursor)).await?;
-                Ok((page.resources, page.next_cursor))
-            },
-        )
+        let resources = collect_pages("resources/list", self.pager(), |cursor| async move {
+            let page = peer.list_resources(page_params(cursor)).await?;
+            Ok((page.resources, page.next_cursor))
+        })
         .await?;
         let templates = collect_pages(
             "resources/templates/list",
-            &self.inner.scrubber,
+            self.pager(),
             |cursor| async move {
                 let first = cursor.is_none();
                 match peer.list_resource_templates(page_params(cursor)).await {
@@ -183,12 +192,13 @@ impl McpClient {
     /// [`McpResource::uri_for`].
     pub async fn read_resource(&self, uri: &str) -> Result<McpResourceOutput> {
         let peer = self.peer()?;
-        let result = self.complete(
-            "resources/read",
-            uri,
-            peer.read_resource_once(ReadResourceRequestParams::new(uri))
-                .await,
-        )?;
+        let result = self
+            .request(
+                "resources/read",
+                uri,
+                peer.read_resource_once(ReadResourceRequestParams::new(uri)),
+            )
+            .await?;
         McpResourceOutput::from_contents(result.contents)
     }
 
@@ -199,7 +209,7 @@ impl McpClient {
         if self.server_capabilities().prompts.is_none() {
             return Ok(Vec::new());
         }
-        let prompts = collect_pages("prompts/list", &self.inner.scrubber, |cursor| async move {
+        let prompts = collect_pages("prompts/list", self.pager(), |cursor| async move {
             let page = peer.list_prompts(page_params(cursor)).await?;
             Ok((page.prompts, page.next_cursor))
         })
@@ -224,12 +234,13 @@ impl McpClient {
         args: Map<String, Value>,
     ) -> Result<McpPromptOutput> {
         let peer = self.peer()?;
-        let result = self.complete(
-            "prompts/get",
-            name,
-            peer.get_prompt_once(GetPromptRequestParams::new(name).with_arguments(args))
-                .await,
-        )?;
+        let result = self
+            .request(
+                "prompts/get",
+                name,
+                peer.get_prompt_once(GetPromptRequestParams::new(name).with_arguments(args)),
+            )
+            .await?;
         McpPromptOutput::from_result(result)
     }
 
@@ -241,23 +252,42 @@ impl McpClient {
     /// `isError: true` and JSON-RPC errors (such as an unknown tool) are `Err`.
     pub async fn call_tool(&self, name: &str, args: Map<String, Value>) -> Result<Value> {
         let peer = self.peer()?;
-        let result = self.complete(
-            "tools/call",
-            name,
-            peer.call_tool_once(CallToolRequestParams::new(name.to_string()).with_arguments(args))
-                .await,
-        )?;
+        let result = self
+            .request(
+                "tools/call",
+                name,
+                peer.call_tool_once(
+                    CallToolRequestParams::new(name.to_string()).with_arguments(args),
+                ),
+            )
+            .await?;
         extract_tool_result(name, result)
     }
 
-    /// Turns the reply to a `*_once` request into its completed result,
-    /// scrubbing any error text.
-    fn complete<R: Into<Reply<T>>, T>(
+    /// Pagination settings for this session.
+    fn pager(&self) -> Pager<'_> {
+        Pager {
+            scrubber: &self.inner.scrubber,
+            timeout: self.inner.request_timeout,
+        }
+    }
+
+    /// Awaits a `*_once` request within the request timeout and turns its
+    /// reply into the completed result, scrubbing any error text. On timeout
+    /// the request future is dropped, which makes rmcp abandon (cancel) it.
+    async fn request<R: Into<Reply<T>>, T>(
         &self,
         method: &str,
         subject: &str,
-        reply: std::result::Result<R, ServiceError>,
+        request: impl Future<Output = std::result::Result<R, ServiceError>>,
     ) -> Result<T> {
+        let timeout = self.inner.request_timeout;
+        let reply = tokio::time::timeout(timeout, request).await.map_err(|_| {
+            Error::Mcp(self.inner.scrubber.scrub(&format!(
+                "{method} '{subject}' timed out after {}",
+                secs(timeout)
+            )))
+        })?;
         reply
             .map_err(|e| format!("{method} '{subject}' failed: {e}"))
             .and_then(|r| r.into().into_complete(method, subject))
@@ -385,27 +415,38 @@ impl From<McpPaginationError> for Error {
     }
 }
 
+/// How [`collect_pages`] scrubs errors and bounds each page request.
+#[derive(Clone, Copy)]
+pub(crate) struct Pager<'a> {
+    pub(crate) scrubber: &'a UrlScrubber,
+    pub(crate) timeout: Duration,
+}
+
 /// Follows opaque `nextCursor` values, concatenating every page's items.
 ///
 /// rmcp's `list_all_*` helpers do not detect cycles, so this loop stops with
-/// [`McpPaginationError::RepeatedCursor`] when a cursor repeats, so a
-/// misbehaving server cannot cause an infinite loop. Errors from `fetch`
-/// (including continuation-page failures) are returned with `method` as context.
+/// [`McpPaginationError::RepeatedCursor`] when a cursor repeats, and with an
+/// error after [`MAX_PAGES`] pages, so a misbehaving server cannot cause an
+/// infinite loop or unbounded memory growth. Each page is bounded by
+/// `pager.timeout`. Errors from `fetch` (including continuation-page
+/// failures) are returned with `method` as context.
 pub(crate) async fn collect_pages<T, F, Fut>(
     method: &str,
-    scrubber: &UrlScrubber,
+    pager: Pager<'_>,
     mut fetch: F,
 ) -> Result<Vec<T>>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = std::result::Result<(Vec<T>, Option<String>), ServiceError>>,
 {
+    let scrubber = pager.scrubber;
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor = None;
-    loop {
-        let (page, next) = fetch(cursor.take())
+    for _ in 0..MAX_PAGES {
+        let (page, next) = tokio::time::timeout(pager.timeout, fetch(cursor.take()))
             .await
+            .map_err(|_| Error::Mcp(format!("{method} timed out after {}", secs(pager.timeout))))?
             .map_err(|e| Error::Mcp(scrubber.scrub(&format!("{method} failed: {e}"))))?;
         items.extend(page);
         match next {
@@ -421,6 +462,9 @@ where
             None => return Ok(items),
         }
     }
+    Err(Error::Mcp(format!(
+        "{method} failed: more than {MAX_PAGES} pages"
+    )))
 }
 
 #[cfg(test)]
@@ -429,6 +473,61 @@ mod tests {
     use std::sync::Mutex;
 
     type Page = std::result::Result<(Vec<u32>, Option<String>), ServiceError>;
+
+    static NO_SCRUB: std::sync::LazyLock<UrlScrubber> = std::sync::LazyLock::new(UrlScrubber::none);
+
+    fn test_pager() -> Pager<'static> {
+        Pager {
+            scrubber: &NO_SCRUB,
+            timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[tokio::test]
+    async fn page_count_is_capped() {
+        let fetched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = fetched.clone();
+        // A fresh cursor every time, so only the page cap can stop it.
+        let fetch = move |_cursor| {
+            let n = count.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok((vec![n as u32], Some(format!("c{n}")))))
+        };
+        let err = collect_pages("x/list", test_pager(), fetch)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "MCP error: x/list failed: more than 1000 pages"
+        );
+        assert_eq!(fetched.load(Ordering::SeqCst), 1000);
+    }
+
+    #[tokio::test]
+    async fn a_page_under_the_cap_is_fine() {
+        let fetched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = fetched.clone();
+        let fetch = move |_cursor| {
+            let n = count.fetch_add(1, Ordering::SeqCst);
+            let next = (n + 1 < 1000).then(|| format!("c{n}"));
+            std::future::ready(Ok((vec![n as u32], next)))
+        };
+        let items = collect_pages("x/list", test_pager(), fetch).await.unwrap();
+        assert_eq!(items.len(), 1000);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn each_page_is_bounded_by_the_timeout() {
+        let fetch = |_cursor| async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok::<_, ServiceError>((Vec::<u32>::new(), None))
+        };
+        let pager = Pager {
+            scrubber: &NO_SCRUB,
+            timeout: Duration::from_millis(1500),
+        };
+        let err = collect_pages("x/list", pager, fetch).await.unwrap_err();
+        assert_eq!(err.to_string(), "MCP error: x/list timed out after 1.5s");
+    }
     type CursorLog = Arc<Mutex<Vec<Option<String>>>>;
 
     /// A fetcher that serves `pages` in order and records the cursors it got.
@@ -456,9 +555,7 @@ mod tests {
             Ok((vec![4], None)),
         ]);
         assert_eq!(
-            collect_pages("x/list", &UrlScrubber::none(), fetch)
-                .await
-                .unwrap(),
+            collect_pages("x/list", test_pager(), fetch).await.unwrap(),
             [1, 2, 3, 4]
         );
         assert_eq!(
@@ -473,7 +570,7 @@ mod tests {
             Ok((vec![1], Some("c1".into()))),
             Ok((vec![2], Some("c1".into()))),
         ]);
-        let err = collect_pages("x/list", &UrlScrubber::none(), fetch)
+        let err = collect_pages("x/list", test_pager(), fetch)
             .await
             .unwrap_err();
         let inner = McpPaginationError::RepeatedCursor("c1".into());
@@ -490,7 +587,7 @@ mod tests {
             Ok((vec![1], Some("c1".into()))),
             Err(ServiceError::TransportClosed),
         ]);
-        let err = collect_pages("x/list", &UrlScrubber::none(), fetch)
+        let err = collect_pages("x/list", test_pager(), fetch)
             .await
             .unwrap_err();
         let msg = err.to_string();

@@ -54,4 +54,6 @@ pub use prompt::{McpPrompt, McpPromptMessage, McpPromptOutput};
 pub use resource::{McpResource, McpResourceContent, McpResourceOutput};
 pub use rmcp::model::ServerCapabilities;
 pub use tool::{McpTool, McpToolInput, McpToolOutput};
-pub use transport::{McpTransport, McpTransportType};
+pub use transport::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, McpTransport, McpTransportType,
+};

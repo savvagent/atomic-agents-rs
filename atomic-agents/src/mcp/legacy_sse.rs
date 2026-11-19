@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 
 /// Default time allowed for the whole connect sequence: the `GET`, its status
 /// check, and the wait for the server's `endpoint` event.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = super::transport::DEFAULT_CONNECT_TIMEOUT;
 
 /// Default cap on bytes buffered without an event boundary. A server that
 /// never terminates an event would otherwise grow the parser buffer without
@@ -160,6 +160,7 @@ impl LegacySseTransport {
     /// Opens the SSE stream at `sse_url`, waits for the `endpoint` event and
     /// returns a transport that posts to it. `headers` are sent on the `GET`
     /// and on every `POST`. See [`resolve_post_url`] for the origin rule.
+    #[cfg(test)]
     pub(crate) async fn connect(
         http: reqwest::Client,
         sse_url: &str,
@@ -168,7 +169,8 @@ impl LegacySseTransport {
         Self::connect_with(http, sse_url, headers, Limits::default()).await
     }
 
-    /// [`connect`](Self::connect) with explicit [`Limits`]. The whole sequence
+    /// Opens the stream as described for `connect`, with explicit
+    /// [`Limits`]. The whole sequence
     /// (`GET`, status check, endpoint wait) is bounded by
     /// `limits.connect_timeout`; on timeout or cancellation the reader task
     /// is aborted.

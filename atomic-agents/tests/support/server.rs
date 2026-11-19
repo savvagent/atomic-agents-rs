@@ -118,6 +118,11 @@ pub fn all_tools() -> Vec<Tool> {
         Tool::new("boom", "Always reports an error", empty()),
         Tool::new("json_text", "Returns JSON encoded as text", empty()),
         Tool::new("stats", "Returns the server's request counters", empty()),
+        Tool::new(
+            "sleep",
+            "Sleeps for `ms` milliseconds, then returns",
+            object(json!({"type": "object", "properties": {"ms": {"type": "number"}}})),
+        ),
     ]
 }
 
@@ -187,6 +192,8 @@ impl ServerHandler for TestServer {
         request: CallToolRequestParams,
         _cx: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + MaybeSendFuture + '_ {
+        let delay = (request.name == "sleep")
+            .then(|| std::time::Duration::from_millis(number_arg(&request, "ms") as u64));
         let result = match request.name.as_ref() {
             "echo" => {
                 let text = request
@@ -207,12 +214,18 @@ impl ServerHandler for TestServer {
                 "{\"k\":1}",
             )])),
             "stats" => Ok(CallToolResult::structured(self.counters.snapshot())),
+            "sleep" => Ok(CallToolResult::success(vec![ContentBlock::text("slept")])),
             other => Err(McpError::invalid_params(
                 format!("unknown tool {other}"),
                 None,
             )),
         };
-        std::future::ready(result.map(CallToolResponse::from))
+        async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            result.map(CallToolResponse::from)
+        }
     }
 
     fn list_resources(

@@ -183,11 +183,12 @@ Resources and prompts are available through `client.resources()` and `client.pro
 | Legacy HTTP + SSE (2024-11-05) | `Sse` | URL; `/sse` is appended unless the path already ends with it |
 | stdio | `Stdio` | Shell-quoted command line, e.g. `npx -y my-server` |
 
-Use `McpTransport` directly for full control (`with_cwd`, `with_env`, `with_header`). `Authorization: Bearer <token>` headers are supported on both HTTP transports.
+Use `McpTransport` directly for full control (`with_cwd`, `with_env`, `with_header`, `with_request_timeout`, `with_connect_timeout`). `Authorization: Bearer <token>` headers are supported on both HTTP transports.
 
 Notes:
 
 - `McpTool::run` blocks, so it needs a multi-threaded tokio runtime; use `McpTool::call` (async) otherwise.
+- Each request (every list page, tool call, resource read and prompt render) times out after 60 s by default, and connecting plus `initialize` after 30 s; a timed-out request is cancelled and the session stays usable. Lists stop with an error after 1000 pages.
 - `input_required` and task replies from a server are reported as explicit `Error::Mcp` messages; they are not supported.
 - URL userinfo, query strings and fragments are redacted from error text, and HTTP client errors from the Streamable HTTP transport carry no URL, so rmcp's own `tracing` output does not leak them either.
 - HTTPS uses native-tls (OpenSSL on Linux, the platform TLS stack elsewhere), the same backend as the crate's other HTTP clients; the `mcp` feature adds no rustls.

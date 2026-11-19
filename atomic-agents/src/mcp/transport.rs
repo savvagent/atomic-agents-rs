@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::service::{ClientCacheConfig, RunningService};
@@ -10,7 +11,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 
-use super::legacy_sse::LegacySseTransport;
+use super::legacy_sse::{LegacySseTransport, Limits};
 use super::redacting_http::RedactingHttpClient;
 use crate::error::{Error, Result};
 
@@ -26,11 +27,22 @@ pub enum McpTransportType {
     Stdio,
 }
 
+/// Default time allowed for each MCP request; see
+/// [`McpTransport::with_request_timeout`].
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default time allowed to connect and complete `initialize`; see
+/// [`McpTransport::with_connect_timeout`].
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How to reach an MCP server.
 ///
 /// URLs in the HTTP variants are used verbatim; use
 /// [`McpTransport::from_endpoint`] for upstream-compatible `/mcp` / `/sse`
 /// suffix resolution.
+///
+/// Every variant carries a request timeout and a connect timeout
+/// ([`DEFAULT_REQUEST_TIMEOUT`], [`DEFAULT_CONNECT_TIMEOUT`] unless set).
 #[derive(Clone, PartialEq, Eq)]
 pub enum McpTransport {
     /// Spawn `command` and speak MCP over its stdin/stdout. The child's
@@ -44,6 +56,10 @@ pub enum McpTransport {
         cwd: Option<PathBuf>,
         /// Extra environment variables for the child.
         env: Vec<(String, String)>,
+        /// Time allowed for each request.
+        request_timeout: Duration,
+        /// Time allowed to spawn the child and complete `initialize`.
+        connect_timeout: Duration,
     },
     /// Streamable HTTP at `url`.
     StreamableHttp {
@@ -51,6 +67,10 @@ pub enum McpTransport {
         url: String,
         /// Extra request headers.
         headers: Vec<(String, String)>,
+        /// Time allowed for each request.
+        request_timeout: Duration,
+        /// Time allowed to complete `initialize`.
+        connect_timeout: Duration,
     },
     /// Legacy HTTP + SSE at `url`.
     Sse {
@@ -58,6 +78,11 @@ pub enum McpTransport {
         url: String,
         /// Extra request headers.
         headers: Vec<(String, String)>,
+        /// Time allowed for each request.
+        request_timeout: Duration,
+        /// Time allowed to open the stream, receive the `endpoint` event and
+        /// complete `initialize`.
+        connect_timeout: Duration,
     },
 }
 
@@ -69,6 +94,8 @@ impl McpTransport {
             args,
             cwd: None,
             env: Vec::new(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 
@@ -77,6 +104,8 @@ impl McpTransport {
         Self::StreamableHttp {
             url: url.into(),
             headers: Vec::new(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
     }
 
@@ -85,6 +114,74 @@ impl McpTransport {
         Self::Sse {
             url: url.into(),
             headers: Vec::new(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+        }
+    }
+
+    /// Sets the time allowed for each request (each page of a list, a tool
+    /// call, a resource read, a prompt render). On expiry the request is
+    /// abandoned (rmcp sends `notifications/cancelled`) and an error is
+    /// returned; the session stays usable. Applies to every variant.
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        match &mut self {
+            Self::Stdio {
+                request_timeout, ..
+            }
+            | Self::StreamableHttp {
+                request_timeout, ..
+            }
+            | Self::Sse {
+                request_timeout, ..
+            } => *request_timeout = timeout,
+        }
+        self
+    }
+
+    /// Sets the time allowed to connect: spawning the child or opening the
+    /// stream, plus the `initialize` handshake. Applies to every variant.
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        match &mut self {
+            Self::Stdio {
+                connect_timeout, ..
+            }
+            | Self::StreamableHttp {
+                connect_timeout, ..
+            }
+            | Self::Sse {
+                connect_timeout, ..
+            } => *connect_timeout = timeout,
+        }
+        self
+    }
+
+    /// The time allowed for each request.
+    pub fn request_timeout(&self) -> Duration {
+        match self {
+            Self::Stdio {
+                request_timeout, ..
+            }
+            | Self::StreamableHttp {
+                request_timeout, ..
+            }
+            | Self::Sse {
+                request_timeout, ..
+            } => *request_timeout,
+        }
+    }
+
+    /// The time allowed to connect and complete `initialize`.
+    pub fn connect_timeout(&self) -> Duration {
+        match self {
+            Self::Stdio {
+                connect_timeout, ..
+            }
+            | Self::StreamableHttp {
+                connect_timeout, ..
+            }
+            | Self::Sse {
+                connect_timeout, ..
+            } => *connect_timeout,
         }
     }
 
@@ -181,22 +278,40 @@ impl std::fmt::Debug for McpTransport {
                 args,
                 cwd,
                 env,
+                request_timeout,
+                connect_timeout,
             } => f
                 .debug_struct("Stdio")
                 .field("command", command)
                 .field("args", &format_args!("<{}>", args.len()))
                 .field("cwd", cwd)
                 .field("env_names", &names(env))
+                .field("request_timeout", request_timeout)
+                .field("connect_timeout", connect_timeout)
                 .finish(),
-            Self::StreamableHttp { url, headers } => f
+            Self::StreamableHttp {
+                url,
+                headers,
+                request_timeout,
+                connect_timeout,
+            } => f
                 .debug_struct("StreamableHttp")
                 .field("url", &redact_url(url))
                 .field("header_names", &names(headers))
+                .field("request_timeout", request_timeout)
+                .field("connect_timeout", connect_timeout)
                 .finish(),
-            Self::Sse { url, headers } => f
+            Self::Sse {
+                url,
+                headers,
+                request_timeout,
+                connect_timeout,
+            } => f
                 .debug_struct("Sse")
                 .field("url", &redact_url(url))
                 .field("header_names", &names(headers))
+                .field("request_timeout", request_timeout)
+                .field("connect_timeout", connect_timeout)
                 .finish(),
         }
     }
@@ -361,8 +476,29 @@ fn http_headers(
     Ok((bearer, parse_header_pairs(&rest)?.into_iter().collect()))
 }
 
-/// Opens `transport` and completes the MCP initialize handshake.
+/// Formats `d` as seconds for error text, e.g. `60s` or `0.2s`.
+pub(crate) fn secs(d: Duration) -> String {
+    format!("{}s", d.as_secs_f64())
+}
+
+/// Opens `transport` and completes the MCP initialize handshake, within the
+/// transport's connect timeout. On expiry the partly opened transport is
+/// dropped (a stdio child is killed).
 pub(crate) async fn connect_transport(
+    transport: &McpTransport,
+) -> Result<RunningService<RoleClient, ClientConfig>> {
+    let timeout = transport.connect_timeout();
+    match tokio::time::timeout(timeout, open_transport(transport)).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Mcp(transport.scrubber().scrub(&format!(
+            "failed to connect to MCP server ({}): initialize timed out after {}",
+            transport.kind_label(),
+            secs(timeout)
+        )))),
+    }
+}
+
+async fn open_transport(
     transport: &McpTransport,
 ) -> Result<RunningService<RoleClient, ClientConfig>> {
     let kind = transport.kind_label();
@@ -376,6 +512,7 @@ pub(crate) async fn connect_transport(
             args,
             cwd,
             env,
+            ..
         } => {
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args).envs(env.iter().map(|(k, v)| (k, v)));
@@ -388,7 +525,7 @@ pub(crate) async fn connect_transport(
                 .map_err(|e| fail(&e))?;
             client_config().serve(child).await.map_err(|e| fail(&e))?
         }
-        McpTransport::StreamableHttp { url, headers } => {
+        McpTransport::StreamableHttp { url, headers, .. } => {
             let (bearer, custom) = http_headers(headers).map_err(|e| fail(&e))?;
             let mut cfg =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(custom);
@@ -401,17 +538,27 @@ pub(crate) async fn connect_transport(
             let http = StreamableHttpClientTransport::with_client(client, cfg);
             client_config().serve(http).await.map_err(|e| fail(&e))?
         }
-        McpTransport::Sse { url, headers } => {
+        McpTransport::Sse {
+            url,
+            headers,
+            connect_timeout,
+            ..
+        } => {
             let map = sse_header_map(headers).map_err(|e| fail(&e))?;
             // Never follow redirects: they could replay credentials elsewhere.
             // A bounded connect phase only: no total timeout, since the SSE
-            // stream is long-lived.
+            // stream is long-lived. The whole connect sequence is bounded by
+            // the transport's connect timeout.
             let http = reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| fail(&e.without_url()))?;
-            let t = LegacySseTransport::connect(http, url, map)
+            let limits = Limits {
+                connect_timeout: *connect_timeout,
+                ..Limits::default()
+            };
+            let t = LegacySseTransport::connect_with(http, url, map, limits)
                 .await
                 .map_err(|e| fail(&e))?;
             // The legacy transport only exists for 2024-11-05 servers.
@@ -589,6 +736,8 @@ mod tests {
                 args: vec![],
                 cwd: Some(PathBuf::from("/tmp")),
                 env: vec![("K".into(), "V".into())],
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+                connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             }
         );
         let http = McpTransport::streamable_http("http://h")
@@ -600,8 +749,32 @@ mod tests {
             McpTransport::StreamableHttp {
                 url: "http://h".into(),
                 headers: vec![("X".into(), "y".into())],
+                request_timeout: DEFAULT_REQUEST_TIMEOUT,
+                connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             }
         );
+    }
+
+    #[test]
+    fn timeouts_default_and_apply_to_every_variant() {
+        let short = Duration::from_millis(250);
+        for t in [
+            McpTransport::stdio("srv", vec![]),
+            McpTransport::streamable_http("http://h"),
+            McpTransport::sse("http://h"),
+        ] {
+            assert_eq!(t.request_timeout(), DEFAULT_REQUEST_TIMEOUT);
+            assert_eq!(t.connect_timeout(), DEFAULT_CONNECT_TIMEOUT);
+            let t = t
+                .with_request_timeout(short)
+                .with_connect_timeout(2 * short);
+            assert_eq!(t.request_timeout(), short);
+            assert_eq!(t.connect_timeout(), 2 * short);
+        }
+        assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(DEFAULT_CONNECT_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(secs(Duration::from_millis(200)), "0.2s");
+        assert_eq!(secs(Duration::from_secs(60)), "60s");
     }
 
     #[test]

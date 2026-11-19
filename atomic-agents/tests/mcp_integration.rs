@@ -38,6 +38,8 @@ use support::{TestServer, spawn_http};
 
 const STDIO_FLAG: &str = "--mcp-test-server-stdio";
 const STDIO_TOOLS_ONLY_FLAG: &str = "--mcp-test-server-stdio-tools-only";
+/// Makes the child sleep without ever speaking MCP.
+const STDIO_SILENT_FLAG: &str = "--mcp-test-server-stdio-silent";
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Scenario = (&'static str, fn() -> BoxFuture<'static, ()>);
@@ -65,6 +67,10 @@ fn scenarios() -> Vec<Scenario> {
         ("http_transport_logs_redact_query", || {
             http_transport_logs_redact_query().boxed()
         }),
+        ("request_timeout_keeps_session_usable", || {
+            request_timeout_keeps_session_usable().boxed()
+        }),
+        ("stdio_connect_timeout", || stdio_connect_timeout().boxed()),
         ("closed_session_errors", || closed_session_errors().boxed()),
         ("tool_trait_over_http", || tool_trait_over_http().boxed()),
         ("tool_trait_over_stdio", || tool_trait_over_stdio().boxed()),
@@ -116,6 +122,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == STDIO_FLAG) {
         serve_stdio(TestServer::default());
+    }
+    if args.iter().any(|a| a == STDIO_SILENT_FLAG) {
+        std::thread::sleep(Duration::from_secs(60));
+        std::process::exit(0);
     }
     if args.iter().any(|a| a == STDIO_TOOLS_ONLY_FLAG) {
         serve_stdio(TestServer::tools_only());
@@ -409,6 +419,59 @@ async fn http_transport_logs_redact_query() {
         !logs.contains("secret123"),
         "query leaked into logs: {logs}"
     );
+}
+
+async fn request_timeout_keeps_session_usable() {
+    for transport in [
+        stdio_transport(STDIO_FLAG),
+        McpTransport::streamable_http(format!(
+            "{}/mcp",
+            spawn_http(TestServer::default()).await.base
+        )),
+    ] {
+        let client = McpClient::connect(transport.with_request_timeout(Duration::from_millis(200)))
+            .await
+            .expect("connect");
+        let started = std::time::Instant::now();
+        let err = client
+            .call_tool("sleep", args(json!({"ms": 5000})))
+            .await
+            .expect_err("sleep outlives the request timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            err.to_string(),
+            "MCP error: tools/call 'sleep' timed out after 0.2s"
+        );
+        let echo = client
+            .call_tool("echo", args(json!({"text": "still here"})))
+            .await;
+        assert_eq!(echo.expect("echo after timeout"), json!("still here"));
+        client.close().await.expect("close");
+    }
+}
+
+async fn stdio_connect_timeout() {
+    let started = std::time::Instant::now();
+    let err = McpClient::connect(
+        stdio_transport(STDIO_SILENT_FLAG).with_connect_timeout(Duration::from_millis(300)),
+    )
+    .await
+    .expect_err("the child never answers initialize");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("failed to connect to MCP server (stdio"),
+        "{text}"
+    );
+    assert!(text.contains("initialize timed out after 0.3s"), "{text}");
 }
 
 async fn closed_session_errors() {
@@ -988,7 +1051,7 @@ async fn definition_service_one_shot() {
     let expected = all_tools();
     let expected_names: Vec<&str> = expected.iter().map(|t| t.name.as_ref()).collect();
     assert_eq!(names, expected_names);
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), all_tools().len());
 
     let resources = service
         .fetch_resource_definitions()
@@ -1002,6 +1065,6 @@ async fn definition_service_one_shot() {
     let service = service.with_working_directory(std::env::temp_dir());
     assert_eq!(
         service.fetch_tool_definitions().await.expect("tools").len(),
-        5
+        all_tools().len()
     );
 }

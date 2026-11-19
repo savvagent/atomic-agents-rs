@@ -20,6 +20,8 @@
 
 - `McpClient`: a persistent, initialised MCP session over stdio, Streamable HTTP or legacy HTTP+SSE, built on `rmcp`. Discovery is capability-gated and paginated, with repeated-cursor detection.
 - `McpTransport` (`stdio`, `streamable_http`, `sse`, `with_cwd`, `with_env`, `with_header`, `from_endpoint`); `Authorization: Bearer` headers are supported.
+- Timeouts on every MCP transport: `McpTransport::with_request_timeout` (default `DEFAULT_REQUEST_TIMEOUT`, 60 s) bounds each request — every page of a list, `tools/call`, `resources/read`, `prompts/get` — and `McpTransport::with_connect_timeout` (default `DEFAULT_CONNECT_TIMEOUT`, 30 s) bounds spawning or opening the transport plus the `initialize` handshake. The legacy SSE transport's 30 s connect budget is now this connect timeout. A timed-out request is abandoned (rmcp sends `notifications/cancelled`) and the session stays usable.
+- List requests stop with an error after 1000 pages, so a server that keeps sending new cursors cannot grow memory without bound.
 - `McpResource` and `McpPrompt` implementing `Resource` and `Prompt`, with `McpResourceOutput` and `McpPromptOutput`.
 - Orchestrator support: `orchestrator_schema`, `McpToolset`, `McpToolCall`, `McpOrchestratorOutput`, and `fetch_mcp_*` helpers.
 - `AgentConfig::with_output_schema` to override the output JSON Schema sent to the model.
