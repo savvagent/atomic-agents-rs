@@ -28,6 +28,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use rmcp::ServiceExt;
 use serde_json::{Map, Value, json};
+use support::legacy_sse_server::{LegacyOptions, spawn_legacy_sse};
 use support::server::{TOOLS_PAGE_SIZE, all_tools};
 use support::{TestServer, spawn_http};
 
@@ -82,6 +83,13 @@ fn scenarios() -> Vec<Scenario> {
         ("prompt_get_error_redacts_query", || {
             prompt_get_error_redacts_query().boxed()
         }),
+        ("sse_discovery_calls_resources_prompts", || {
+            sse_discovery_calls_resources_prompts().boxed()
+        }),
+        ("sse_cross_origin_endpoint_rejected", || {
+            sse_cross_origin_endpoint_rejected().boxed()
+        }),
+        ("sse_header_forwarded", || sse_header_forwarded().boxed()),
     ]
 }
 
@@ -727,4 +735,81 @@ async fn prompt_get_error_redacts_query() {
     assert!(!text.contains("secret123"), "secret leaked: {text}");
     client.close().await.expect("close");
     http.shutdown().await;
+}
+
+/// Legacy HTTP+SSE: endpoint resolution, the 2024-11-05 handshake, paged
+/// discovery, calls, resources and prompts over one session.
+async fn sse_discovery_calls_resources_prompts() {
+    use std::sync::atomic::Ordering;
+
+    let server = TestServer::default();
+    let counters = server.counters();
+    let legacy = spawn_legacy_sse(server, LegacyOptions::default()).await;
+    let client = McpClient::connect_endpoint(&legacy.base, McpTransportType::Sse)
+        .await
+        .expect("connect sse");
+    assert_eq!(client.protocol_version(), "2024-11-05");
+    assert_discovery(&client).await;
+    let echo = client.call_tool("echo", args(json!({"text": "hi"}))).await;
+    assert_eq!(echo.expect("echo"), json!("hi"));
+    let hello = client.read_resource("mem://hello").await.expect("read");
+    assert!(!hello.contents.is_empty(), "{hello:?}");
+    let greet = client
+        .get_prompt("greet", args(json!({"name": "Ada"})))
+        .await
+        .expect("get_prompt");
+    assert_eq!(greet.content, "Hello, Ada!");
+    assert_eq!(counters.initialize.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        counters.tools_list.load(Ordering::SeqCst),
+        tools_pages(),
+        "tools/list pages"
+    );
+    client.close().await.expect("close");
+    legacy.shutdown().await;
+}
+
+/// An absolute endpoint on another origin must be refused, not posted to.
+async fn sse_cross_origin_endpoint_rejected() {
+    let legacy = spawn_legacy_sse(
+        TestServer::default(),
+        LegacyOptions {
+            endpoint_override: Some("http://evil.example/messages?session=1".into()),
+            ..LegacyOptions::default()
+        },
+    )
+    .await;
+    let err = match McpClient::connect_endpoint(&legacy.base, McpTransportType::Sse).await {
+        Ok(_) => panic!("cross-origin endpoint accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("same-origin"), "{err}");
+    assert!(!err.contains("evil.example"), "endpoint leaked: {err}");
+    legacy.shutdown().await;
+}
+
+/// Configured headers ride on the SSE `GET` and on every message `POST`; the
+/// server rejects requests without them.
+async fn sse_header_forwarded() {
+    use std::sync::atomic::Ordering;
+
+    let legacy = spawn_legacy_sse(
+        TestServer::default(),
+        LegacyOptions {
+            required_header: Some(("x-api-key".into(), "k".into())),
+            ..LegacyOptions::default()
+        },
+    )
+    .await;
+    let transport = McpTransport::sse(format!("{}/sse", legacy.base)).with_header("x-api-key", "k");
+    let client = McpClient::connect(transport).await.expect("connect sse");
+    client.list_tools().await.expect("list_tools");
+    assert!(legacy.observed.get_had_header.load(Ordering::SeqCst));
+    assert!(legacy.observed.posts.load(Ordering::SeqCst) >= 3);
+    assert!(legacy.observed.post_had_header.load(Ordering::SeqCst));
+    client.close().await.expect("close");
+
+    let bare = McpClient::connect(McpTransport::sse(format!("{}/sse", legacy.base))).await;
+    assert!(bare.is_err(), "connect without the header must fail");
+    legacy.shutdown().await;
 }

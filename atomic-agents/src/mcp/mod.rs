@@ -27,6 +27,7 @@
 
 mod client;
 mod definitions;
+mod legacy_sse;
 mod prompt;
 mod resource;
 mod result;

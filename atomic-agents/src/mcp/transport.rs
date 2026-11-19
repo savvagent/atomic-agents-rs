@@ -10,6 +10,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 
+use super::legacy_sse::LegacySseTransport;
 use crate::error::{Error, Result};
 
 /// MCP transport protocol, used with endpoint strings
@@ -369,8 +370,30 @@ pub(crate) async fn connect_transport(
             let http = StreamableHttpClientTransport::from_config(cfg);
             client_config().serve(http).await.map_err(|e| fail(&e))?
         }
-        McpTransport::Sse { .. } => {
-            return Err(fail(&"legacy SSE transport not yet available"));
+        McpTransport::Sse { url, headers } => {
+            let mut map = reqwest::header::HeaderMap::new();
+            for (name, value) in headers {
+                let n = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|e| fail(&format!("invalid header name {name:?}: {e}")))?;
+                let mut v = reqwest::header::HeaderValue::from_str(value)
+                    .map_err(|e| fail(&format!("invalid value for header {n}: {e}")))?;
+                v.set_sensitive(true);
+                map.append(n, v);
+            }
+            // Never follow redirects: they could replay credentials elsewhere.
+            let http = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| fail(&e.without_url()))?;
+            let t = LegacySseTransport::connect(http, url, map)
+                .await
+                .map_err(|e| fail(&e))?;
+            // The legacy transport only exists for 2024-11-05 servers.
+            client_config()
+                .with_protocol_version(ProtocolVersion::V_2024_11_05)
+                .serve(t)
+                .await
+                .map_err(|e| fail(&e))?
         }
     };
     // Discovery must always reflect the server (and repeated-cursor detection

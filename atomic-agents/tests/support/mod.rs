@@ -1,5 +1,6 @@
 //! Shared fixtures for the MCP integration harness.
 
+pub mod legacy_sse_server;
 pub mod server;
 
 use std::sync::{Arc, Mutex};
