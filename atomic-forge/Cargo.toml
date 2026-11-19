@@ -16,7 +16,7 @@ atomic-agents = { version = "0.1.1", path = "../atomic-agents" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "fs"] }
 reqwest.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -24,7 +24,19 @@ evalexpr = "12"
 scraper = "0.22"
 encoding_rs = "0.8"
 url = { version = "2", features = ["serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"], optional = true }
+chrono-tz = { version = "0.10.4", optional = true }
+lopdf = { version = "0.47", default-features = false, optional = true }
+roxmltree = "0.21.2"
+futures.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
+
+[features]
+default = []
+# Date/time arithmetic and IANA timezone support for `datetime_tool`.
+datetime = ["dep:chrono", "dep:chrono-tz"]
+# PDF text extraction for `pdf_reader`.
+pdf-reader = ["dep:lopdf"]
