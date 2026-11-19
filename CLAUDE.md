@@ -14,6 +14,7 @@ cargo test                               # Run all tests
 cargo test -p atomic-agents              # Test core crate only
 cargo test -p atomic-forge               # Test tools crate only
 cargo test test_agent_run_async          # Run a single test by name
+cargo test -p atomic-agents --features mcp --test mcp_integration  # MCP integration scenarios (harness=false)
 cargo build -p atomic-agents --features "openai,anthropic,google,mcp"  # All features
 cargo run -p atomic-assembler            # Run the TUI tool browser
 cargo run --example basic_chatbot -p atomic-agents --features openai   # Run an example
@@ -77,7 +78,7 @@ Feature-gated provider implementations behind `async_trait`: `OpenAiClient`, `An
 
 ### MCP integration
 
-Behind the `mcp` feature flag. Uses `serde_json::Value` for dynamic schemas since Rust can't create types at runtime. `McpDefinitionService` fetches definitions; `McpTool` wraps them as dynamic tool implementations.
+Behind the `mcp` feature flag (the `mcp` module is not compiled without it). Built on `rmcp`. `McpClient` = one persistent, initialised session (stdio child / Streamable HTTP / legacy SSE). Discovery is capability-gated and paginated with repeated-cursor detection. `McpTool`/`McpResource`/`McpPrompt` implement `Tool`/`Resource`/`Prompt` (sync `run` needs a multi-thread runtime; async `call`/`read_async`/`get`). `orchestrator_schema` + `AgentConfig::with_output_schema` let an agent pick a tool; `McpToolset::dispatch` runs the choice. `McpDefinitionService` is a one-shot compat wrapper. Integration tests are in `atomic-agents/tests/mcp_integration.rs` (harness=false, re-execs itself as the stdio server) — run with `cargo test -p atomic-agents --features mcp --test mcp_integration`.
 
 ### SystemPromptGenerator
 

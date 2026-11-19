@@ -64,6 +64,7 @@ pub struct AtomicAgent<I: IOSchema, O: IOSchema, C: LlmClient> {
     mode: ExtractionMode,
     max_retries: usize,
     max_context_tokens: Option<usize>,
+    output_schema: Option<serde_json::Value>,
     hooks: Mutex<HookRegistry>,
     extra_params: std::collections::HashMap<String, serde_json::Value>,
     _phantom: PhantomData<(I, O)>,
@@ -100,6 +101,7 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
             mode,
             max_retries: config.max_retries,
             max_context_tokens: config.max_context_tokens,
+            output_schema: config.output_schema,
             hooks: Mutex::new(HookRegistry::new()),
             extra_params: config.model_api_parameters,
             _phantom: PhantomData,
@@ -518,8 +520,13 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
 
         // For JSON mode, append schema to system prompt
         if matches!(self.mode, ExtractionMode::Json | ExtractionMode::MdJson) {
-            let schema = <O as IOSchema>::generate_schema();
-            let schema_json = serde_json::to_string_pretty(&schema).unwrap_or_default();
+            // Keep the typed serialisation when there is no override so the
+            // prompt stays byte-identical to what it was before overrides existed.
+            let schema_json = match &self.output_schema {
+                Some(schema) => serde_json::to_string_pretty(schema).unwrap_or_default(),
+                None => serde_json::to_string_pretty(&<O as IOSchema>::generate_schema())
+                    .unwrap_or_default(),
+            };
             prompt.push_str(&format!(
                 "\n\n# RESPONSE SCHEMA\nYou must respond with JSON matching this schema:\n```json\n{}\n```\n",
                 schema_json
@@ -562,11 +569,18 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
         messages
     }
 
+    /// The output JSON Schema sent to the LLM: the configured override, or the
+    /// one generated from `O`.
+    fn output_schema_value(&self) -> serde_json::Value {
+        self.output_schema.clone().unwrap_or_else(|| {
+            serde_json::to_value(<O as IOSchema>::generate_schema()).unwrap_or_default()
+        })
+    }
+
     fn build_tools_definition(&self) -> Option<Vec<ToolDefinition>> {
         match self.mode {
             ExtractionMode::Tools => {
-                let schema = <O as IOSchema>::generate_schema();
-                let mut params = serde_json::to_value(&schema).unwrap_or_default();
+                let mut params = self.output_schema_value();
 
                 // Remove $schema and title from parameters (not needed in tool def)
                 if let serde_json::Value::Object(ref mut map) = params {
@@ -1386,6 +1400,50 @@ mod tests {
         let result = agent.get_context_token_count().unwrap();
         assert_eq!(result.tools, 0);
         assert!(result.system_prompt > 0);
+    }
+
+    fn override_schema() -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]})
+    }
+
+    fn agent_with_mode(
+        mode: ExtractionMode,
+        schema: Option<serde_json::Value>,
+    ) -> AtomicAgent<BasicChatInputSchema, BasicChatOutputSchema, MockClient> {
+        let mut config = AgentConfig::new(MockClient::new("{}"), "gpt-4o").with_mode(mode);
+        if let Some(schema) = schema {
+            config = config.with_output_schema(schema);
+        }
+        AtomicAgent::new(config)
+    }
+
+    #[test]
+    fn test_output_schema_override_tools_mode() {
+        let agent = agent_with_mode(ExtractionMode::Tools, Some(override_schema()));
+        let tools = agent.build_tools_definition().unwrap();
+        assert_eq!(tools[0].function.parameters, override_schema());
+        assert_eq!(
+            tools[0].function.name,
+            BasicChatOutputSchema::schema_title()
+        );
+    }
+
+    #[test]
+    fn test_output_schema_override_json_mode() {
+        let agent = agent_with_mode(ExtractionMode::Json, Some(override_schema()));
+        let messages = agent.build_system_messages();
+        let prompt = messages[0].content.as_str().unwrap();
+        assert!(prompt.contains("\"x\""));
+        assert!(!prompt.contains("chat_message"));
+    }
+
+    #[test]
+    fn test_output_schema_default_unchanged() {
+        let agent = agent_with_mode(ExtractionMode::Tools, None);
+        let mut expected = serde_json::to_value(BasicChatOutputSchema::generate_schema()).unwrap();
+        expected.as_object_mut().unwrap().remove("$schema");
+        let tools = agent.build_tools_definition().unwrap();
+        assert_eq!(tools[0].function.parameters, expected);
     }
 
     #[test]

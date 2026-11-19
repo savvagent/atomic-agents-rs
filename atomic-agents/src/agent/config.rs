@@ -42,6 +42,10 @@ pub struct AgentConfig<C: LlmClient> {
     /// `None` disables trimming. Must be positive; a zero budget makes every
     /// run fail with [`Error::Config`].
     pub max_context_tokens: Option<usize>,
+    /// Overrides the JSON Schema sent to the LLM for the output type. Parsing
+    /// still deserialises into `O`, so the override must describe a shape `O`
+    /// accepts. Used for schemas only known at runtime, e.g. MCP orchestrators.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 impl<C: LlmClient> AgentConfig<C> {
@@ -57,6 +61,7 @@ impl<C: LlmClient> AgentConfig<C> {
             max_retries: 3,
             model_api_parameters: HashMap::new(),
             max_context_tokens: None,
+            output_schema: None,
         }
     }
 
@@ -88,6 +93,13 @@ impl<C: LlmClient> AgentConfig<C> {
 
     pub fn with_param(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.model_api_parameters.insert(key.into(), value);
+        self
+    }
+
+    /// Overrides the output JSON Schema sent to the LLM. See
+    /// [`output_schema`](Self::output_schema).
+    pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
         self
     }
 

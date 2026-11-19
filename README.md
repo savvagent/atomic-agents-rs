@@ -24,6 +24,7 @@ Built on [serde](https://serde.rs/) and [schemars](https://graham.cool/schemars/
   - [Anatomy of an Agent](#anatomy-of-an-agent)
   - [Context Providers](#context-providers)
   - [Chaining Schemas and Agents](#chaining-schemas-and-agents)
+  - [MCP Tools](#mcp-tools)
 - [Examples](#examples)
 - [Atomic Forge & CLI](#atomic-forge--cli)
 - [Project Structure](#project-structure)
@@ -153,6 +154,51 @@ agent.register_context_provider(
 
 Chain agents and tools by aligning their input and output schemas. When one agent's output schema matches a tool's input schema, the output can be fed directly as input — enabling modular, swappable pipelines.
 
+### MCP Tools
+
+With the `mcp` feature, an `McpClient` holds one persistent, initialised session with an [MCP](https://modelcontextprotocol.io) server. Its tools implement `Tool`, and `McpToolset` merges them into a single output schema so an agent can pick one:
+
+```rust
+use atomic_agents::mcp::{McpOrchestratorOutput, McpToolset, McpTransportType, fetch_mcp_attributes_with_schema};
+use atomic_agents::prelude::*;
+
+let (client, tools, schema) =
+    fetch_mcp_attributes_with_schema("http://localhost:8080", McpTransportType::HttpStream).await?;
+let toolset = McpToolset::new(tools)?;
+
+let config = AgentConfig::new(OpenAiClient::new(api_key), "gpt-4o-mini")
+    .with_output_schema(schema);
+let agent = AtomicAgent::<BasicChatInputSchema, McpOrchestratorOutput, _>::new(config);
+
+let choice = agent.run_async(Some(BasicChatInputSchema { chat_message: "add 2 and 3".into() })).await?;
+let result = toolset.dispatch(&choice.tool_parameters).await?;
+client.close().await?;
+```
+
+Resources and prompts are available through `client.resources()` and `client.prompts()`; discovery follows pagination and only asks for what the server advertises.
+
+| Transport | `McpTransportType` | Endpoint string |
+|-----------|--------------------|-----------------|
+| Streamable HTTP (recommended) | `HttpStream` | URL; `/mcp` is appended unless the path already ends with it |
+| Legacy HTTP + SSE (2024-11-05) | `Sse` | URL; `/sse` is appended unless the path already ends with it |
+| stdio | `Stdio` | Shell-quoted command line, e.g. `npx -y my-server` |
+
+Use `McpTransport` directly for full control (`with_cwd`, `with_env`, `with_inherited_env`, `with_header`, `with_request_timeout`, `with_connect_timeout`). `Authorization: Bearer <token>` headers are supported on both HTTP transports.
+
+**Trust boundary:** a connected MCP server is inside your trust boundary. Its tool names, descriptions and schemas reach the LLM as-is and unmarked, so a malicious server can steer the model. `McpToolset::dispatch` only calls tools discovered from the server, but arguments are not validated against a tool's `input_schema`. Connect only to servers you trust.
+
+Notes:
+
+- `McpTool::run` blocks, so it needs a multi-threaded tokio runtime; use `McpTool::call` (async) otherwise.
+- A stdio server gets only a small allowlist of the parent's environment variables (`PATH`, `HOME`, `USER`, ... — see `DEFAULT_INHERITED_ENV_VARS`) plus those set with `with_env`, so API keys in your environment do not reach it. Use `with_inherited_env()` to pass everything.
+- Each request (every list page, tool call, resource read and prompt render) times out after 60 s by default, and connecting plus `initialize` after 30 s; a timed-out request is cancelled and the session stays usable. Lists stop with an error after 1000 pages.
+- `input_required` and task replies from a server are reported as explicit `Error::Mcp` messages; they are not supported.
+- URL userinfo, query strings and fragments are redacted from error text, and HTTP client errors from the Streamable HTTP transport carry no URL, so rmcp's own `tracing` output does not leak them either.
+- HTTPS uses native-tls (OpenSSL on Linux, the platform TLS stack elsewhere), the same backend as the crate's other HTTP clients; the `mcp` feature adds no rustls.
+- The legacy SSE transport only accepts a same-origin POST endpoint, never follows redirects, allows the connect timeout (30 s by default) to connect and caps each event at 16 MiB.
+- The orchestrator schema is deterministic (sorted keys) and lists `tool_name` first in `required`; it does not rely on property order.
+- The orchestrator schema drops each tool's own `$schema` and hoists its `$defs` into the root. Gemini function declarations do not support `$ref`/`$defs`, so tools whose schemas use them may need flattening for Google models.
+
 ## Examples
 
 Examples are in the `atomic-agents/examples/` directory. Run them with:
@@ -169,7 +215,7 @@ Available examples:
 - **[hooks](atomic-agents/examples/hooks.rs)** — Hook system for monitoring and error handling
 - **[multi_provider](atomic-agents/examples/multi_provider.rs)** — Using different LLM providers (OpenAI, Anthropic, Google)
 - **[orchestration](atomic-agents/examples/orchestration.rs)** — Orchestrator agent that routes between tools
-- **[mcp_agent](atomic-agents/examples/mcp_agent.rs)** — MCP (Model Context Protocol) integration
+- **[mcp_agent](atomic-agents/examples/mcp_agent.rs)** — Agent that selects and calls a tool from an MCP server (`MCP_ENDPOINT`, `MCP_TRANSPORT`, `OPENAI_API_KEY`)
 
 Some examples require additional feature flags:
 
@@ -178,7 +224,7 @@ Some examples require additional feature flags:
 ANTHROPIC_API_KEY=... cargo run --example multi_provider -p atomic-agents --features anthropic
 
 # MCP
-cargo run --example mcp_agent -p atomic-agents --features mcp
+OPENAI_API_KEY=... MCP_ENDPOINT=http://localhost:8080 cargo run --example mcp_agent -p atomic-agents --features mcp
 ```
 
 ## Atomic Forge & CLI

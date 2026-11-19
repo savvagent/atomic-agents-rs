@@ -32,6 +32,7 @@ pub mod agent;
 pub mod chat_history;
 pub mod client;
 pub mod error;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod prompt;
 pub mod resource;
