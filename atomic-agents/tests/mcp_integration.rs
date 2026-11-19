@@ -67,6 +67,9 @@ fn scenarios() -> Vec<Scenario> {
         ("resource_templates_method_not_found_tolerated", || {
             resource_templates_method_not_found_tolerated().boxed()
         }),
+        ("resource_read_error_redacts_query", || {
+            resource_read_error_redacts_query().boxed()
+        }),
         ("resource_read_on_current_thread_runtime_errors", || {
             resource_read_on_current_thread_runtime_errors().boxed()
         }),
@@ -574,4 +577,24 @@ async fn resource_read_on_current_thread_runtime_errors() {
     .join()
     .expect("read must not panic");
     client.close().await.expect("close");
+}
+
+/// The server echoes the requested URI in its error, and a caller-supplied
+/// URI may carry the endpoint's secret; `resources/read` errors must be
+/// scrubbed like every other MCP error.
+async fn resource_read_error_redacts_query() {
+    let http = spawn_http(TestServer::default()).await;
+    let endpoint = format!("{}/mcp?token=secret123", http.base);
+    let client = McpClient::connect_endpoint(&endpoint, McpTransportType::HttpStream)
+        .await
+        .expect("connect http endpoint");
+    let err = client
+        .read_resource("mem://nope?token=secret123")
+        .await
+        .expect_err("unknown resource");
+    let text = err.to_string();
+    assert!(text.contains("resources/read"), "{text}");
+    assert!(!text.contains("secret123"), "secret leaked: {text}");
+    client.close().await.expect("close");
+    http.shutdown().await;
 }

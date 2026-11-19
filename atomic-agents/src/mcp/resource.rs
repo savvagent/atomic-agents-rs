@@ -216,13 +216,24 @@ fn arg_text(v: &Value) -> String {
 /// Values are percent-encoded except unreserved characters (and reserved
 /// ones for `+` / `#`); non-string values use their JSON text. A missing
 /// variable is an error, except for `?` / `&` (form-style query) variables,
-/// which are omitted. Prefix (`:n`) and explode (`*`) modifiers are ignored.
+/// which are omitted. Null arguments count as missing. Prefix (`:n`) and
+/// explode (`*`) modifiers are ignored.
+///
+/// For the simple and path-style operators (everything except `+` / `#`), a
+/// value that is exactly `.` or `..` is encoded as `%2E` / `%2E%2E`: left
+/// literal it would form a dot segment, and a server that normalises paths
+/// would resolve it to a different resource (path traversal). Dots inside a
+/// longer value are harmless and stay as they are.
+///
+/// A template with an unclosed `{` or an empty expression (`{}`) is an error.
 pub(crate) fn fill_template(template: &str, args: &Map<String, Value>) -> Result<String> {
     let mut out = String::new();
     let mut rest = template;
     while let Some(open) = rest.find('{') {
         let after = &rest[open + 1..];
-        let Some(close) = after.find('}') else { break };
+        let Some(close) = after.find('}') else {
+            return Err(Error::Mcp("invalid URI template: unclosed '{'".to_string()));
+        };
         out.push_str(&rest[..open]);
         expand(&after[..close], args, &mut out)?;
         rest = &after[close + 1..];
@@ -236,6 +247,11 @@ fn expand(expr: &str, args: &Map<String, Value>, out: &mut String) -> Result<()>
         Some(c @ ('+' | '#' | '.' | '/' | ';' | '?' | '&')) => (Some(c), &expr[1..]),
         _ => (None, expr),
     };
+    if list.trim().is_empty() {
+        return Err(Error::Mcp(
+            "invalid URI template: empty expression".to_string(),
+        ));
+    }
     let optional = matches!(op, Some('?' | '&'));
     let keep_reserved = matches!(op, Some('+' | '#'));
     let mut parts = Vec::new();
@@ -257,7 +273,11 @@ fn expand(expr: &str, args: &Map<String, Value>, out: &mut String) -> Result<()>
                 "missing required resource template parameter '{name}'"
             )));
         };
-        let value = encode(&arg_text(value), keep_reserved);
+        let text = arg_text(value);
+        let value = match text.as_str() {
+            "." | ".." if !keep_reserved => text.replace('.', "%2E"),
+            _ => encode(&text, keep_reserved),
+        };
         parts.push(match op {
             Some('?' | '&') => format!("{name}={value}"),
             Some(';') if value.is_empty() => name.to_string(),
@@ -361,14 +381,50 @@ mod tests {
     #[test]
     fn other_operators() {
         let a = args(json!({"v": "a b", "w": "c"}));
-        assert_eq!(
-            fill_template("x{#v}", &a).unwrap(),
-            "x#a b".replace(' ', "%20")
-        );
+        assert_eq!(fill_template("x{#v}", &a).unwrap(), "x#a%20b");
         assert_eq!(fill_template("x{/v,w}", &a).unwrap(), "x/a%20b/c");
         assert_eq!(fill_template("x{.w}", &a).unwrap(), "x.c");
         assert_eq!(fill_template("x{;w}", &a).unwrap(), "x;w=c");
         assert_eq!(fill_template("x{v,w}", &a).unwrap(), "xa%20b,c");
+    }
+
+    #[test]
+    fn dot_segments_are_encoded_except_for_reserved_expansion() {
+        for (v, enc) in [(".", "%2E"), ("..", "%2E%2E")] {
+            let a = args(json!({"v": v}));
+            assert_eq!(fill_template("x/{v}/y", &a).unwrap(), format!("x/{enc}/y"));
+            assert_eq!(fill_template("x{/v}", &a).unwrap(), format!("x/{enc}"));
+            assert_eq!(fill_template("x{+v}", &a).unwrap(), format!("x{v}"));
+        }
+        let a = args(json!({"v": "a.b"}));
+        assert_eq!(fill_template("x/{v}", &a).unwrap(), "x/a.b");
+    }
+
+    #[test]
+    fn simple_expansion_of_mixed_unicode_and_reserved() {
+        assert_eq!(
+            fill_template("{v}", &args(json!({"v": "é/../?#"}))).unwrap(),
+            "%C3%A9%2F..%2F%3F%23"
+        );
+    }
+
+    #[test]
+    fn malformed_templates_are_errors() {
+        let a = args(json!({"id": "1"}));
+        let err = fill_template("x/{id", &a).unwrap_err().to_string();
+        assert!(err.contains("invalid URI template: unclosed '{'"), "{err}");
+        let err = fill_template("x/{}", &a).unwrap_err().to_string();
+        assert!(err.contains("invalid URI template"), "{err}");
+        assert!(fill_template("x/{+}", &a).is_err());
+    }
+
+    #[test]
+    fn null_arguments_count_as_missing() {
+        assert!(fill_template("x/{id}", &args(json!({"id": null}))).is_err());
+        assert_eq!(
+            fill_template("x{?id}", &args(json!({"id": null}))).unwrap(),
+            "x"
+        );
     }
 
     #[test]
