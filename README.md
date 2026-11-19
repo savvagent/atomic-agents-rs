@@ -39,14 +39,14 @@ Add `atomic-agents` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-agents = "0.1"
+atomic-agents = "0.2"
 ```
 
 By default, the OpenAI provider is enabled. Enable additional providers with feature flags:
 
 ```toml
 [dependencies]
-atomic-agents = { version = "0.1", features = ["openai", "anthropic", "google", "mcp"] }
+atomic-agents = { version = "0.2", features = ["openai", "anthropic", "google", "mcp"] }
 ```
 
 ### Quick Example
@@ -189,6 +189,13 @@ cargo run --example mcp_agent -p atomic-agents --features mcp
 - Tavily Search — Web search via Tavily API
 - SearXNG Search — Meta-search via SearXNG
 - BoCha Search — Web search via BoCha API
+- arXiv Search — Academic paper search via the arXiv API
+- Hacker News Search — Stories and comments via Algolia
+- Wikipedia Search — Encyclopedic article summaries
+- Weather — Current conditions and forecast via Open-Meteo
+- Firecrawl Search — Web and news search via Firecrawl
+- DateTime — Time zones, parsing, shifting and diffs (feature `datetime`)
+- PDF Reader — Text and metadata extraction (feature `pdf-reader`)
 - Webpage Scraper — HTML to text scraping
 - YouTube Transcript — Video transcript extraction
 

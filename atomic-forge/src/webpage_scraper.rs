@@ -2,6 +2,8 @@ use atomic_agents::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::net_guard::NetGuard;
+
 /// Scrape a webpage and extract its content as plain text.
 #[derive(IOSchema, Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct WebpageScraperInput {
@@ -41,11 +43,18 @@ pub struct WebpageScraperOutput {
 }
 
 /// Configuration for the webpage scraper.
+///
+/// Fetches go through [`NetGuard`]: by default loopback, private, link-local
+/// (cloud metadata) and other non-public addresses are refused, redirects are
+/// validated hop by hop, and connections are pinned to the validated IPs. Set
+/// `allow_private_hosts` to `true` only for trusted URLs (e.g. local testing).
 pub struct WebpageScraperConfig {
     pub component: ComponentConfig,
     pub user_agent: String,
     pub timeout_secs: u64,
     pub max_content_length: usize,
+    /// Allow fetching loopback/private/link-local hosts. Defaults to `false`.
+    pub allow_private_hosts: bool,
 }
 
 impl Default for WebpageScraperConfig {
@@ -57,6 +66,7 @@ impl Default for WebpageScraperConfig {
             user_agent: "Mozilla/5.0 (compatible; AtomicAgents/1.0)".to_string(),
             timeout_secs: 30,
             max_content_length: 1_000_000,
+            allow_private_hosts: false,
         }
     }
 }
@@ -64,47 +74,55 @@ impl Default for WebpageScraperConfig {
 /// Tool for scraping webpages and extracting text content.
 pub struct WebpageScraperTool {
     config: ComponentConfig,
-    client: reqwest::Client,
+    guard: NetGuard,
+    user_agent: String,
+    timeout: std::time::Duration,
     max_content_length: usize,
 }
 
 impl WebpageScraperTool {
     pub fn new(scraper_config: WebpageScraperConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(&scraper_config.user_agent)
-            .timeout(std::time::Duration::from_secs(scraper_config.timeout_secs))
-            .build()
-            .expect("Failed to create HTTP client");
-
         Self {
             config: scraper_config.component,
-            client,
+            guard: NetGuard::new(scraper_config.allow_private_hosts),
+            user_agent: scraper_config.user_agent,
+            timeout: std::time::Duration::from_secs(scraper_config.timeout_secs),
             max_content_length: scraper_config.max_content_length,
         }
     }
 
     async fn scrape(&self, url: &str, include_links: bool) -> std::result::Result<WebpageScraperOutput, Error> {
-        let response = self
-            .client
-            .get(url)
-            .send()
+        let mut response = self
+            .guard
+            .get(url, &self.user_agent, "text/html,application/xhtml+xml,*/*;q=0.8", self.timeout)
             .await
             .map_err(|e| Error::Validation(format!("Failed to fetch URL: {e}")))?;
 
         let final_url = response.url().clone();
         let domain = final_url.host_str().unwrap_or("").to_string();
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| Error::Validation(format!("Failed to read response: {e}")))?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
 
-        if html.len() > self.max_content_length {
-            return Err(Error::Validation(format!(
-                "Content exceeds maximum length of {} bytes",
-                self.max_content_length
-            )));
+        // Stream the body so oversized responses are rejected without buffering them fully.
+        if response.content_length().is_some_and(|l| l > self.max_content_length as u64) {
+            return Err(too_large(self.max_content_length));
         }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Error::Validation(format!("Failed to read response: {e}")))?
+        {
+            if body.len() + chunk.len() > self.max_content_length {
+                return Err(too_large(self.max_content_length));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let html = decode_body(&body, content_type.as_deref());
 
         let document = scraper::Html::parse_document(&html);
 
@@ -135,9 +153,18 @@ impl WebpageScraperTool {
             .map(String::from);
 
         // Extract main text content
+        let base_selector = scraper::Selector::parse("base[href]").unwrap();
+        let base_url = document
+            .select(&base_selector)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .and_then(|href| final_url.join(href.trim()).ok())
+            .filter(|u| !matches!(u.scheme(), "data" | "javascript"))
+            .unwrap_or_else(|| final_url.clone());
+
         let body_selector = scraper::Selector::parse("body").unwrap();
         let content = if let Some(body) = document.select(&body_selector).next() {
-            extract_text(body, include_links)
+            extract_text(body, include_links, &base_url, false)
         } else {
             String::new()
         };
@@ -176,11 +203,60 @@ impl Tool for WebpageScraperTool {
     }
 }
 
+/// Decodes an HTML body to text (upstream #418).
+///
+/// Precedence: byte-order mark, then the `charset` parameter of the
+/// `Content-Type` header, then a `<meta charset>` / `http-equiv` declaration
+/// in the first 1024 bytes, then UTF-8. Invalid sequences are replaced.
+fn decode_body(body: &[u8], content_type: Option<&str>) -> String {
+    let declared = content_type
+        .and_then(charset_param)
+        .or_else(|| sniff_meta_charset(&body[..body.len().min(1024)]))
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    // `decode` honours a BOM over the declared encoding.
+    let (text, _, _) = declared.decode(body);
+    text.into_owned()
+}
+
+fn charset_param(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| value.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+fn sniff_meta_charset(head: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    let idx = head.find("charset=")?;
+    let rest = head[idx + "charset=".len()..].trim_start_matches(['"', '\'']);
+    let label: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        .collect();
+    (!label.is_empty()).then_some(label)
+}
+
+fn too_large(max: usize) -> Error {
+    Error::Validation(format!("Content exceeds maximum length of {max} bytes"))
+}
+
+/// Resolves `href` against `base`, falling back to the raw value when it cannot be parsed.
+fn resolve_href(base: &url::Url, href: &str) -> String {
+    base.join(href.trim()).map(String::from).unwrap_or_else(|_| href.to_string())
+}
+
 /// Extracts text from an HTML element, optionally preserving links.
-fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
+///
+/// Links are resolved against `base`. `header`/`footer` elements nested inside
+/// `main`/`article`/`section` are kept (they hold headings and attribution);
+/// page-level ones are dropped. `in_section` tracks that nesting.
+fn extract_text(element: scraper::ElementRef, include_links: bool, base: &url::Url, in_section: bool) -> String {
     let mut text = String::new();
     // Remove script and style elements by skipping them
-    let skip_tags = ["script", "style", "noscript", "nav", "footer", "header"];
+    let skip_tags = ["script", "style", "noscript", "nav"];
 
     for node in element.children() {
         match node.value() {
@@ -193,17 +269,18 @@ fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
             }
             scraper::Node::Element(el) => {
                 let tag = el.name();
-                if skip_tags.contains(&tag) {
+                if skip_tags.contains(&tag) || (!in_section && matches!(tag, "header" | "footer")) {
                     continue;
                 }
+                let child_in_section = in_section || matches!(tag, "main" | "article" | "section");
 
                 if let Some(child_ref) = scraper::ElementRef::wrap(node) {
-                    let child_text = extract_text(child_ref, include_links);
+                    let child_text = extract_text(child_ref, include_links, base, child_in_section);
 
                     if include_links && tag == "a" {
                         if let Some(href) = el.attr("href") {
                             if !child_text.trim().is_empty() {
-                                text.push_str(&format!("[{}]({})", child_text.trim(), href));
+                                text.push_str(&format!("[{}]({})", child_text.trim(), resolve_href(base, href)));
                                 text.push(' ');
                                 continue;
                             }
@@ -233,4 +310,107 @@ fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
         .filter(|l| !l.is_empty())
         .collect();
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract(html: &str, base: &str) -> String {
+        let doc = scraper::Html::parse_document(html);
+        let sel = scraper::Selector::parse("body").unwrap();
+        let body = doc.select(&sel).next().unwrap();
+        extract_text(body, true, &url::Url::parse(base).unwrap(), false)
+    }
+
+    #[test]
+    fn links_resolve_against_final_url() {
+        let out = extract(r#"<body><p><a href="/a/b">x</a> <a href="rel">y</a></p></body>"#, "https://example.com/dir/page");
+        assert!(out.contains("[x](https://example.com/a/b)"), "{out}");
+        assert!(out.contains("[y](https://example.com/dir/rel)"), "{out}");
+    }
+
+    #[test]
+    fn page_level_header_footer_dropped_but_article_ones_kept() {
+        let html = "<body><header>Site</header><article><header><h1>Title</h1>By Ann</header><p>Body</p><footer>Source X</footer></article><footer>Copyright</footer></body>";
+        let out = extract(html, "https://e.com/");
+        assert!(!out.contains("Site") && !out.contains("Copyright"), "{out}");
+        assert!(out.contains("Title") && out.contains("By Ann") && out.contains("Source X"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn local_tool() -> WebpageScraperTool {
+        WebpageScraperTool::new(WebpageScraperConfig { allow_private_hosts: true, ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn default_config_rejects_private_hosts() {
+        let tool = WebpageScraperTool::default();
+        for url in ["http://127.0.0.1/", "http://169.254.169.254/latest/meta-data"] {
+            let err = tool.scrape(url, true).await.unwrap_err().to_string();
+            assert!(err.contains("non-public"), "{url}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn links_resolve_against_final_url_after_redirect() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/dir/final"))
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::path("/dir/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"<body><a href="rel">x</a></body>"#))
+            .mount(&server)
+            .await;
+        let out = local_tool().scrape(&format!("{}/start", server.uri()), true).await.unwrap();
+        assert!(out.content.contains(&format!("[x]({}/dir/rel)", server.uri())), "{}", out.content);
+    }
+
+    #[test]
+    fn decodes_using_content_type_charset() {
+        // "café" in ISO-8859-1 / windows-1252.
+        let body = b"<p>caf\xe9</p>";
+        assert_eq!(decode_body(body, Some("text/html; charset=ISO-8859-1")), "<p>café</p>");
+        assert_eq!(decode_body(body, Some("text/html; Charset=\"windows-1252\"")), "<p>café</p>");
+    }
+
+    #[test]
+    fn decodes_using_meta_charset_when_header_lacks_one() {
+        let body = b"<html><head><meta charset=\"windows-1252\"></head><p>caf\xe9</p></html>";
+        assert!(decode_body(body, Some("text/html")).contains("café"));
+        let body = b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=shift_jis\">\x82\xa0";
+        assert!(decode_body(body, None).ends_with('あ'));
+    }
+
+    #[test]
+    fn defaults_to_utf8_and_honours_bom() {
+        assert_eq!(decode_body("café".as_bytes(), None), "café");
+        assert_eq!(decode_body(b"caf\xe9", Some("text/html; charset=bogus")), "caf\u{fffd}");
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("café".as_bytes());
+        assert_eq!(decode_body(&bom, Some("text/html; charset=ISO-8859-1")), "café");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_body_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!("<html><body>{}</body></html>", "a".repeat(500))))
+            .mount(&server)
+            .await;
+        let cfg = WebpageScraperConfig { max_content_length: 100, allow_private_hosts: true, ..Default::default() };
+        let tool = WebpageScraperTool::new(cfg);
+        assert!(tool.scrape(&server.uri(), true).await.is_err());
+
+        let tool = local_tool();
+        let r = tool.scrape(&server.uri(), true).await.unwrap();
+        assert!(r.content.starts_with('a'));
+    }
 }

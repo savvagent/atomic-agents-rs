@@ -18,6 +18,6 @@ mod dynamic_tool;
 
 pub use definition_service::{
     McpDefinitionService, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
-    McpTransportType,
+    McpPaginationError, McpTransportType,
 };
 pub use dynamic_tool::{McpTool, create_mcp_tools};
