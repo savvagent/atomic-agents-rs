@@ -71,6 +71,11 @@ impl SearxngSearchTool {
         }
     }
 
+    /// Maps tool-level category names to SearXNG category names.
+    fn searxng_category(category: &str) -> &str {
+        if category == "social_media" { "social media" } else { category }
+    }
+
     async fn search_query(
         &self,
         query: &str,
@@ -82,7 +87,7 @@ impl SearxngSearchTool {
         ];
 
         if let Some(cat) = category {
-            params.push(("categories", cat.to_string()));
+            params.push(("categories", Self::searxng_category(cat).to_string()));
         }
 
         let url = format!("{}/search", self.base_url.trim_end_matches('/'));
@@ -146,5 +151,17 @@ impl Tool for SearxngSearchTool {
             results,
             category: input.category,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn social_media_maps_to_searxng_category() {
+        assert_eq!(SearxngSearchTool::searxng_category("social_media"), "social media");
+        assert_eq!(SearxngSearchTool::searxng_category("news"), "news");
+        assert_eq!(SearxngSearchTool::searxng_category("general"), "general");
     }
 }
