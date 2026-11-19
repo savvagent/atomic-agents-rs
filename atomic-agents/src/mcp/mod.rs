@@ -1,23 +1,36 @@
-//! MCP (Model Context Protocol) integration.
+//! MCP (Model Context Protocol) client integration, built on [`rmcp`].
 //!
-//! Provides dynamic tool, resource, and prompt creation from MCP servers.
-//! Since Rust cannot create types at runtime, MCP tools use `serde_json::Value`
-//! for dynamic schemas with JSON Schema validation via the `jsonschema` crate.
+//! An [`McpClient`] is one initialised session with an MCP server, reached
+//! over stdio (a child process) or Streamable HTTP. Discovery is gated by the
+//! server's advertised capabilities and follows pagination; tool calls reuse
+//! the session. Since Rust cannot create types at runtime, schemas and tool
+//! results are `serde_json::Value`.
 //!
-//! # Architecture
+//! - [`McpTransport`] / [`McpTransportType`] - how to reach the server
+//! - [`McpClient`] - the session: discovery and `tools/call`
+//! - [`McpToolDefinition`], [`McpResourceDefinition`], [`McpPromptDefinition`] - discovered metadata
 //!
-//! - [`McpTransportType`] - Transport protocol selection (STDIO, HTTP, SSE)
-//! - [`McpToolDefinition`] - Tool metadata fetched from MCP servers
-//! - [`McpResourceDefinition`] - Resource metadata
-//! - [`McpPromptDefinition`] - Prompt metadata
-//! - [`McpDefinitionService`] - Fetches definitions from MCP endpoints
-//! - [`McpTool`] - Dynamic tool implementation using `serde_json::Value` I/O
+//! ```no_run
+//! use atomic_agents::mcp::{McpClient, McpTransportType};
+//!
+//! # async fn demo() -> atomic_agents::error::Result<()> {
+//! let client = McpClient::connect_endpoint("http://localhost:8080", McpTransportType::HttpStream).await?;
+//! for tool in client.list_tools().await? {
+//!     println!("{}", tool.name);
+//! }
+//! client.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 
-mod definition_service;
-mod dynamic_tool;
+mod client;
+mod definitions;
+mod result;
+mod transport;
 
-pub use definition_service::{
-    McpDefinitionService, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
-    McpPaginationError, McpTransportType,
+pub use client::{McpClient, McpPaginationError};
+pub use definitions::{
+    McpPromptArgument, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
 };
-pub use dynamic_tool::{McpTool, create_mcp_tools};
+pub use rmcp::model::ServerCapabilities;
+pub use transport::{McpTransport, McpTransportType};
