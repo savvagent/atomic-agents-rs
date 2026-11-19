@@ -7,8 +7,8 @@
 - `McpTool::new(definition, endpoint, transport)` and `with_working_directory` are removed; tools come from `McpClient::tools()` or `McpTool::from_definition(def, client)`.
 - `McpTool::run(Value)` is replaced by `McpTool::call(Map)` (async) and `Tool::run(McpToolInput)` (sync); the public fields `name`, `description`, `input_schema` and `output_schema` become accessors.
 - `create_mcp_tools(endpoint, transport_type) -> Result<Vec<McpTool>>` now returns `Result<(McpClient, Vec<McpTool>)>`.
-- `McpDefinitionService` keeps `new`, `with_working_directory`, `fetch_tool_definitions`, `fetch_resource_definitions` and `fetch_prompt_definitions`, but each call now opens and closes a real session; HTTP endpoints resolve to `/mcp` instead of `/mcp/<method>`.
-- `McpResourceDefinition` gains `is_template`; `McpPromptDefinition` gains `arguments`. `McpPaginationError::MissingItems` is removed.
+- `McpDefinitionService` keeps `new`, `with_working_directory`, `fetch_tool_definitions`, `fetch_resource_definitions` and `fetch_prompt_definitions`, but each call now opens and closes a real session; HTTP endpoints resolve to `/mcp` instead of `/mcp/<method>`. `fetch_resource_definitions` now also returns resource templates, and every `fetch_*` returns an empty list when the server does not advertise that capability.
+- `McpToolDefinition` gains `title`; `McpResourceDefinition` gains `is_template`; `McpPromptDefinition` gains `arguments`. None is `#[non_exhaustive]`, so struct-literal construction must add the fields. `McpPaginationError::MissingItems` is removed.
 - `McpTransportType` is unchanged.
 - `atomic_agents::mcp` is now compiled only with the `mcp` feature; before, it was compiled unconditionally.
 
@@ -27,6 +27,11 @@
 - URL userinfo, query and fragment are redacted from MCP error text; header values are marked sensitive.
 - Legacy SSE hardening: same-origin POST endpoint, no redirects, 30 s connect budget, 16 MiB per-event cap.
 - The orchestrator schema does not require `serde_json/preserve_order`; `tool_name` is listed first in `required` only.
+
+### Known limitations
+
+- `rmcp` logs some transport errors through `tracing` itself; those log lines are outside this crate's URL redaction, so keep credentials out of endpoint query strings when transport errors are logged.
+- MCP `input_required` (multi-round-trip) and task replies are reported as errors, not handled.
 
 ### Migration
 

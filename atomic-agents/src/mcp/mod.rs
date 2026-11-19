@@ -1,7 +1,7 @@
 //! MCP (Model Context Protocol) client integration, built on [`rmcp`].
 //!
 //! An [`McpClient`] is one initialised session with an MCP server, reached
-//! over stdio (a child process) or Streamable HTTP. Discovery is gated by the
+//! over stdio (a child process), Streamable HTTP or legacy HTTP+SSE. Discovery is gated by the
 //! server's advertised capabilities and follows pagination; tool calls reuse
 //! the session. Since Rust cannot create types at runtime, schemas and tool
 //! results are `serde_json::Value`.
@@ -11,6 +11,8 @@
 //! - [`McpTool`] - a discovered tool implementing [`Tool`](crate::tool::Tool)
 //! - [`McpToolset`] / [`orchestrator_schema`] - one output schema over many tools, plus dispatch
 //! - [`McpResource`] - a discovered resource or template implementing [`Resource`](crate::resource::Resource)
+//! - [`McpPrompt`] - a discovered prompt implementing [`Prompt`](crate::prompt::Prompt)
+//! - [`McpDefinitionService`] - one-shot discovery that opens and closes its own session
 //! - [`McpToolDefinition`], [`McpResourceDefinition`], [`McpPromptDefinition`] - discovered metadata
 //!
 //! ```no_run
