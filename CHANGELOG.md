@@ -2,7 +2,7 @@
 
 ## 0.2.1 — Unreleased
 
-### Fixed
+### Documentation
 
 - This changelog labelled the changes released in 0.2.0 as "Unreleased — next minor (0.3.0)", and left out the core changes from the upstream sync. Both are corrected below.
 - docs.rs now builds `atomic-agents` with all features, so the `mcp`, `anthropic` and `google` APIs are documented there, and each feature-gated item shows the feature it needs.
@@ -29,15 +29,17 @@
 - `AgentConfig::history` is now `Option<Box<dyn BaseChatHistory>>` and `AgentConfig::system_prompt_generator` is `Option<Box<dyn BaseSystemPromptGenerator>>`. `with_history` and `with_system_prompt` take any implementation, and `AtomicAgent::history()` returns `Box<dyn BaseChatHistory>`.
 - `AgentConfig` gains a public `max_context_tokens: Option<usize>` field.
 - `ContentPart` gains a `VideoUrl` variant. It is not `#[non_exhaustive]`, so exhaustive matches must handle it.
+- `TokenCounter::count_context` no longer double-counts request framing, so reported totals (and therefore `max_context_tokens` trimming) can be slightly lower than in 0.1.1.
 - A failed run (client error, extraction failure, over-budget context, or a failed or dropped stream) now removes the user turn it added to the history, and a streamed run records its final output in the history.
 - `AgentConfig` gains a public `output_schema: Option<serde_json::Value>` field. It is not `#[non_exhaustive]`, so struct-literal construction must add the field (or use `AgentConfig::new`).
 
 ### Added
 
 - Context token budget: `AgentConfig::with_max_context_tokens` trims the oldest turns before a run, always keeps the current turn, and errors if even the current turn does not fit. A zero budget is rejected.
-- `AtomicAgent::get_context_token_count`, which fires the `HookEvent::TokenCounted` hook. `TokenCounter::count_context` counts request framing once, so system prompt + history + tools add up to the total.
+- `AtomicAgent::get_context_token_count`, which fires the `HookEvent::TokenCounted` hook. `TokenCounter::count_message`, `TokenCounter::history_framing` and `TokenCounter::REPLY_PRIMING_TOKENS`; system prompt + history + tools now add up to the total.
 - `BaseChatHistory` (implemented by `ChatHistory`) and `BaseSystemPromptGenerator` (implemented by `SystemPromptGenerator`) traits, `ChatHistory::turn_ids`, and `VideoUrlContent`.
-- `ChatHistory::load` enforces the restored `max_messages` capacity, and a failed load leaves the existing history untouched. `delete_turn` resets the current turn id.
+- `ChatHistory::load` enforces the restored `max_messages` capacity. `delete_turn` resets the current turn id.
+- `ExtractionMode` derives `Copy`, `PartialEq` and `Eq`.
 - `atomic-forge` (not published to crates.io) gains arXiv, Hacker News, Wikipedia, weather, datetime, PDF reader and Firecrawl search tools, an SSRF guard for network and file access, and upstream scraper, BoCha and SearXNG fixes.
 - `McpClient`: a persistent, initialised MCP session over stdio, Streamable HTTP or legacy HTTP+SSE, built on `rmcp`. Discovery is capability-gated and paginated, with repeated-cursor detection.
 - `McpTransport` (`stdio`, `streamable_http`, `sse`, `with_cwd`, `with_env`, `with_inherited_env`, `with_header`, `with_request_timeout`, `with_connect_timeout`, `from_endpoint`); `Authorization: Bearer` headers are supported.
