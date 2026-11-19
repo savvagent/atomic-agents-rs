@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Rust port of the [atomic-agents](https://github.com/BrainBlend-AI/atomic-agents) Python framework — a lightweight, modular framework for building AI agent pipelines with structured LLM outputs. Uses Rust edition 2024.
+Rust port of the [atomic-agents](https://github.com/Eigenwise/atomic-agents) Python framework — a lightweight, modular framework for building AI agent pipelines with structured LLM outputs. Uses Rust edition 2024.
 
 ## Build & Test Commands
 
