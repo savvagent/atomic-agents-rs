@@ -48,6 +48,9 @@ fn scenarios() -> Vec<Scenario> {
         ("repeated_cursor_errors", || {
             repeated_cursor_errors().boxed()
         }),
+        ("http_connect_error_redacts_query", || {
+            http_connect_error_redacts_query().boxed()
+        }),
         ("closed_session_errors", || closed_session_errors().boxed()),
     ]
 }
@@ -63,12 +66,16 @@ fn main() {
 
     // Libtest-style flags: `--flag value` pairs are skipped as a unit.
     let mut filter = None;
+    let mut skips: Vec<String> = Vec::new();
     let mut list = false;
+    let mut ignored = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--list" => list = true,
-            "--test-threads" | "--skip" | "--format" | "--color" => {
+            "--ignored" | "--include-ignored" => ignored = true,
+            "--skip" => skips.extend(it.next().cloned()),
+            "--test-threads" | "--format" | "--color" => {
                 it.next();
             }
             _ if a.starts_with('-') => {}
@@ -76,7 +83,8 @@ fn main() {
         }
     }
     if list {
-        for (name, _) in scenarios() {
+        // No scenario is marked ignored.
+        for (name, _) in scenarios().into_iter().filter(|_| !ignored) {
             println!("{name}: test");
         }
         std::process::exit(0);
@@ -93,7 +101,9 @@ fn main() {
         .expect("tokio runtime");
     let (mut passed, mut failed) = (0usize, 0usize);
     for (name, scenario) in scenarios() {
-        if filter.as_deref().is_some_and(|f| !name.contains(f)) {
+        if filter.as_deref().is_some_and(|f| !name.contains(f))
+            || skips.iter().any(|k| name.contains(k.as_str()))
+        {
             continue;
         }
         // Spawning isolates panics: a panicking scenario surfaces as a JoinError.
@@ -294,6 +304,22 @@ async fn repeated_cursor_errors() {
     assert_err_contains(client.list_tools().await, "tools/list");
     client.close().await.expect("close");
     http.shutdown().await;
+}
+
+async fn http_connect_error_redacts_query() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        l.local_addr().expect("addr").port()
+    };
+    let url = format!("http://user:pw@127.0.0.1:{port}/mcp?token=secret123");
+    let err = McpClient::connect(McpTransport::streamable_http(url))
+        .await
+        .expect_err("nothing is listening");
+    let text = err.to_string();
+    assert!(text.contains("failed to connect"), "{text}");
+    for leaked in ["secret123", "pw"] {
+        assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+    }
 }
 
 async fn closed_session_errors() {

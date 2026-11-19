@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 
 use super::definitions::{McpPromptDefinition, McpResourceDefinition, McpToolDefinition};
 use super::result::extract_tool_result;
-use super::transport::{McpTransport, McpTransportType, connect_transport};
+use super::transport::{McpTransport, McpTransportType, UrlScrubber, connect_transport};
 use crate::error::{Error, Result};
 
 /// How long [`McpClient::close`] waits for the session to shut down.
@@ -40,12 +40,14 @@ struct Inner {
     peer: Peer<RoleClient>,
     info: Arc<ServerPeerInfo>,
     closed: AtomicBool,
+    scrubber: UrlScrubber,
     service: tokio::sync::Mutex<Option<RunningService<RoleClient, ClientConfig>>>,
 }
 
 impl McpClient {
     /// Connects over `transport` and completes the initialize handshake.
     pub async fn connect(transport: McpTransport) -> Result<Self> {
+        let scrubber = transport.scrubber();
         let service = connect_transport(&transport).await?;
         let info = service.peer_info().ok_or_else(|| {
             Error::Mcp("MCP server did not complete the initialize handshake".to_string())
@@ -55,6 +57,7 @@ impl McpClient {
                 peer: service.peer().clone(),
                 info,
                 closed: AtomicBool::new(false),
+                scrubber,
                 service: tokio::sync::Mutex::new(Some(service)),
             }),
         })
@@ -95,7 +98,7 @@ impl McpClient {
         if self.server_capabilities().tools.is_none() {
             return Ok(Vec::new());
         }
-        let tools = collect_pages("tools/list", |cursor| async move {
+        let tools = collect_pages("tools/list", &self.inner.scrubber, |cursor| async move {
             let page = peer.list_tools(page_params(cursor)).await?;
             Ok((page.tools, page.next_cursor))
         })
@@ -112,23 +115,31 @@ impl McpClient {
         if self.server_capabilities().resources.is_none() {
             return Ok(Vec::new());
         }
-        let resources = collect_pages("resources/list", |cursor| async move {
-            let page = peer.list_resources(page_params(cursor)).await?;
-            Ok((page.resources, page.next_cursor))
-        })
+        let resources = collect_pages(
+            "resources/list",
+            &self.inner.scrubber,
+            |cursor| async move {
+                let page = peer.list_resources(page_params(cursor)).await?;
+                Ok((page.resources, page.next_cursor))
+            },
+        )
         .await?;
-        let templates = collect_pages("resources/templates/list", |cursor| async move {
-            let first = cursor.is_none();
-            match peer.list_resource_templates(page_params(cursor)).await {
-                Ok(page) => Ok((page.resource_templates, page.next_cursor)),
-                Err(ServiceError::McpError(e))
-                    if first && e.code == ErrorCode::METHOD_NOT_FOUND =>
-                {
-                    Ok((Vec::new(), None))
+        let templates = collect_pages(
+            "resources/templates/list",
+            &self.inner.scrubber,
+            |cursor| async move {
+                let first = cursor.is_none();
+                match peer.list_resource_templates(page_params(cursor)).await {
+                    Ok(page) => Ok((page.resource_templates, page.next_cursor)),
+                    Err(ServiceError::McpError(e))
+                        if first && e.code == ErrorCode::METHOD_NOT_FOUND =>
+                    {
+                        Ok((Vec::new(), None))
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(e),
-            }
-        })
+            },
+        )
         .await?;
         Ok(resources
             .into_iter()
@@ -148,7 +159,7 @@ impl McpClient {
         if self.server_capabilities().prompts.is_none() {
             return Ok(Vec::new());
         }
-        let prompts = collect_pages("prompts/list", |cursor| async move {
+        let prompts = collect_pages("prompts/list", &self.inner.scrubber, |cursor| async move {
             let page = peer.list_prompts(page_params(cursor)).await?;
             Ok((page.prompts, page.next_cursor))
         })
@@ -167,7 +178,13 @@ impl McpClient {
         let result = peer
             .call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(args))
             .await
-            .map_err(|e| Error::Mcp(format!("tools/call '{name}' failed: {e}")))?;
+            .map_err(|e| {
+                Error::Mcp(
+                    self.inner
+                        .scrubber
+                        .scrub(&format!("tools/call '{name}' failed: {e}")),
+                )
+            })?;
         extract_tool_result(name, result)
     }
 
@@ -182,7 +199,11 @@ impl McpClient {
         match service.close_with_timeout(CLOSE_TIMEOUT).await {
             Ok(Some(_)) => Ok(()),
             Ok(None) => Err(Error::Mcp("timed out closing MCP session".to_string())),
-            Err(e) => Err(Error::Mcp(format!("failed to close MCP session: {e}"))),
+            Err(e) => Err(Error::Mcp(
+                self.inner
+                    .scrubber
+                    .scrub(&format!("failed to close MCP session: {e}")),
+            )),
         }
     }
 }
@@ -232,7 +253,11 @@ impl From<McpPaginationError> for Error {
 /// [`McpPaginationError::RepeatedCursor`] when a cursor repeats, so a
 /// misbehaving server cannot cause an infinite loop. Errors from `fetch`
 /// (including continuation-page failures) are returned with `method` as context.
-pub(crate) async fn collect_pages<T, F, Fut>(method: &str, mut fetch: F) -> Result<Vec<T>>
+pub(crate) async fn collect_pages<T, F, Fut>(
+    method: &str,
+    scrubber: &UrlScrubber,
+    mut fetch: F,
+) -> Result<Vec<T>>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = std::result::Result<(Vec<T>, Option<String>), ServiceError>>,
@@ -243,7 +268,7 @@ where
     loop {
         let (page, next) = fetch(cursor.take())
             .await
-            .map_err(|e| Error::Mcp(format!("{method} failed: {e}")))?;
+            .map_err(|e| Error::Mcp(scrubber.scrub(&format!("{method} failed: {e}"))))?;
         items.extend(page);
         match next {
             Some(next) => {
@@ -292,7 +317,12 @@ mod tests {
             Ok((vec![3], Some("c2".into()))),
             Ok((vec![4], None)),
         ]);
-        assert_eq!(collect_pages("x/list", fetch).await.unwrap(), [1, 2, 3, 4]);
+        assert_eq!(
+            collect_pages("x/list", &UrlScrubber::none(), fetch)
+                .await
+                .unwrap(),
+            [1, 2, 3, 4]
+        );
         assert_eq!(
             *cursors.lock().unwrap(),
             [None, Some("c1".to_string()), Some("c2".to_string())]
@@ -305,7 +335,9 @@ mod tests {
             Ok((vec![1], Some("c1".into()))),
             Ok((vec![2], Some("c1".into()))),
         ]);
-        let err = collect_pages("x/list", fetch).await.unwrap_err();
+        let err = collect_pages("x/list", &UrlScrubber::none(), fetch)
+            .await
+            .unwrap_err();
         let inner = McpPaginationError::RepeatedCursor("c1".into());
         assert!(
             err.to_string().contains(&format!("x/list failed: {inner}")),
@@ -320,7 +352,9 @@ mod tests {
             Ok((vec![1], Some("c1".into()))),
             Err(ServiceError::TransportClosed),
         ]);
-        let err = collect_pages("x/list", fetch).await.unwrap_err();
+        let err = collect_pages("x/list", &UrlScrubber::none(), fetch)
+            .await
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("x/list failed") && msg.contains("Transport closed"),

@@ -148,6 +148,14 @@ impl McpTransport {
         }
     }
 
+    /// The scrubber for error text produced while talking over this transport.
+    pub(crate) fn scrubber(&self) -> UrlScrubber {
+        match self {
+            Self::Stdio { .. } => UrlScrubber::none(),
+            Self::StreamableHttp { url, .. } | Self::Sse { url, .. } => UrlScrubber::new(url),
+        }
+    }
+
     fn kind_label(&self) -> String {
         match self {
             Self::Stdio { command, .. } => format!("stdio '{command}'"),
@@ -174,7 +182,7 @@ impl std::fmt::Debug for McpTransport {
             } => f
                 .debug_struct("Stdio")
                 .field("command", command)
-                .field("args", args)
+                .field("args", &format_args!("<{}>", args.len()))
                 .field("cwd", cwd)
                 .field("env_names", &names(env))
                 .finish(),
@@ -189,6 +197,67 @@ impl std::fmt::Debug for McpTransport {
                 .field("header_names", &names(headers))
                 .finish(),
         }
+    }
+}
+
+/// Removes URL secrets from error strings produced by lower layers.
+///
+/// HTTP clients (reqwest) append the full request URL to their errors, so the
+/// query string, fragment and userinfo must be scrubbed from the formatted
+/// text, not only from our own labels. A scrubber built from a non-URL
+/// (stdio) is a no-op.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct UrlScrubber {
+    /// `(needle, replacement)` pairs, applied in order (longest first).
+    rules: Vec<(String, String)>,
+}
+
+impl UrlScrubber {
+    /// A scrubber that changes nothing.
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
+    /// Builds a scrubber for `url`. An unparseable URL yields a no-op.
+    pub(crate) fn new(url: &str) -> Self {
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Self::none();
+        };
+        let redacted = redact_url(url);
+        let mut rules = Vec::new();
+        let mut push = |needle: String, with: String| {
+            if !needle.is_empty() && !rules.iter().any(|(n, _)| *n == needle) {
+                rules.push((needle, with));
+            }
+        };
+        let mut no_userinfo = parsed.clone();
+        let _ = no_userinfo.set_username("");
+        let _ = no_userinfo.set_password(None);
+        push(url.to_string(), redacted.clone());
+        push(parsed.to_string(), redacted.clone());
+        push(no_userinfo.to_string(), redacted);
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            let info = match parsed.password() {
+                Some(pw) => format!("{}:{pw}@", parsed.username()),
+                None => format!("{}@", parsed.username()),
+            };
+            push(info, String::new());
+        }
+        if let Some(q) = parsed.query() {
+            push(format!("?{q}"), "?<redacted>".to_string());
+        }
+        if let Some(f) = parsed.fragment() {
+            push(format!("#{f}"), "#<redacted>".to_string());
+        }
+        rules.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+        Self { rules }
+    }
+
+    /// Returns `text` with every known secret-bearing part replaced.
+    pub(crate) fn scrub(&self, text: &str) -> String {
+        self.rules
+            .iter()
+            .fold(text.to_string(), |acc, (n, r)| acc.replace(n.as_str(), r))
     }
 }
 
@@ -267,8 +336,9 @@ pub(crate) async fn connect_transport(
     transport: &McpTransport,
 ) -> Result<RunningService<RoleClient, ClientConfig>> {
     let kind = transport.kind_label();
+    let scrubber = transport.scrubber();
     let fail = |e: &dyn std::fmt::Display| {
-        Error::Mcp(format!("failed to connect to MCP server ({kind}): {e}"))
+        Error::Mcp(scrubber.scrub(&format!("failed to connect to MCP server ({kind}): {e}")))
     };
     let service = match transport {
         McpTransport::Stdio {
@@ -367,6 +437,30 @@ mod tests {
     fn resolve_rejects_invalid_url() {
         let err = resolve_endpoint("not a url", "/mcp").unwrap_err();
         assert!(err.to_string().contains("Invalid endpoint URL"), "{err}");
+    }
+
+    #[test]
+    fn scrubber_removes_url_secrets_from_text() {
+        let s = UrlScrubber::new("http://user:pw@127.0.0.1:9/mcp?token=secret123#frag9");
+        let text = "error sending request for url (http://user:pw@127.0.0.1:9/mcp?token=secret123#frag9) \
+                    and (http://127.0.0.1:9/mcp?token=secret123) again ?token=secret123 #frag9 user:pw@x";
+        let out = s.scrub(text);
+        for leaked in ["secret123", "pw", "user", "frag9"] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+        assert!(out.contains("127.0.0.1:9/mcp"), "{out}");
+        assert_eq!(UrlScrubber::none().scrub("a?b=c"), "a?b=c");
+        assert_eq!(
+            McpTransport::stdio("x", vec![]).scrubber().scrub("?q"),
+            "?q"
+        );
+    }
+
+    #[test]
+    fn debug_hides_stdio_args() {
+        let t = McpTransport::stdio("srv", vec!["--key=hunter2".into()]);
+        let d = format!("{t:?}");
+        assert!(!d.contains("hunter2") && d.contains("<1>"), "{d}");
     }
 
     #[test]
