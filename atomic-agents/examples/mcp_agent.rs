@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         std::env::var("MCP_ENDPOINT").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let kind = transport_from_env()?;
 
-    println!("Connecting to MCP server at {endpoint}...");
+    println!("Connecting to MCP server at {}...", redact(&endpoint));
     let (client, tools, schema) = fetch_mcp_attributes_with_schema(&endpoint, kind).await?;
     println!("Found {} tools", tools.len());
     let toolset = McpToolset::new(tools)?;
@@ -61,4 +61,31 @@ async fn main() -> Result<()> {
     println!("Result: {result}");
 
     client.close().await
+}
+
+/// The endpoint without anything that may carry a credential: userinfo,
+/// query string and fragment. A stdio command line keeps only the program.
+fn redact(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        let program = endpoint.split_whitespace().next().unwrap_or("");
+        return format!("{program} [args hidden]");
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn redacts_credentials() {
+        assert_eq!(redact("https://u:pw@h:1/mcp?token=s#f"), "https://h:1/mcp");
+        assert_eq!(redact("http://h?token=s"), "http://h");
+        assert_eq!(redact("npx -y srv --key=s"), "npx [args hidden]");
+    }
 }
