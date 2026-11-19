@@ -92,8 +92,12 @@ fn main() {
     if let Some(f) = &filter
         && !scenarios().iter().any(|(n, _)| n.contains(f.as_str()))
     {
-        eprintln!("filter {f:?} matched no scenarios");
-        std::process::exit(1);
+        // Same as libtest: `cargo test <filter>` hands the filter to every test
+        // binary, so a filter aimed at unit tests must not fail this one. Say so
+        // loudly instead, so a typo'd filter is not mistaken for a green run.
+        eprintln!("note: filter {f:?} matched no MCP integration scenarios; nothing ran");
+        println!("0 passed, 0 failed (0 matched filter {f:?})");
+        std::process::exit(0);
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
