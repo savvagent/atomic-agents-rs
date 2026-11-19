@@ -25,3 +25,5 @@ pub mod wikipedia_search;
 pub mod weather;
 #[cfg(feature = "datetime")]
 pub mod datetime_tool;
+#[cfg(feature = "pdf-reader")]
+pub mod pdf_reader;
