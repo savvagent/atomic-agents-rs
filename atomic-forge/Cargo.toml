@@ -23,7 +23,19 @@ tracing.workspace = true
 evalexpr = "12"
 scraper = "0.22"
 url = { version = "2", features = ["serde"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"], optional = true }
+chrono-tz = { version = "0.10.4", optional = true }
+lopdf = { version = "0.47.0", optional = true }
+roxmltree = "0.21.2"
+futures.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"
+
+[features]
+default = []
+# Date/time arithmetic and IANA timezone support for `datetime_tool`.
+datetime = ["dep:chrono", "dep:chrono-tz"]
+# PDF text extraction for `pdf_reader`.
+pdf-reader = ["dep:lopdf"]

@@ -19,3 +19,4 @@ pub mod webpage_scraper;
 pub mod youtube_transcript;
 pub mod searxng_search;
 pub mod bocha_search;
+pub mod arxiv_search;
