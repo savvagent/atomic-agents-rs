@@ -1,4 +1,6 @@
-use super::definition_service::{McpDefinitionService, McpToolDefinition, McpTransportType};
+use super::definition_service::{
+    McpDefinitionService, McpToolDefinition, McpTransportType, transport_endpoint,
+};
 
 /// A dynamically-created tool from an MCP server.
 ///
@@ -69,17 +71,9 @@ impl McpTool {
         input: serde_json::Value,
     ) -> Result<serde_json::Value, crate::error::Error> {
         let client = reqwest::Client::new();
-        let url = format!("{}/mcp/tools/call", self.endpoint.trim_end_matches('/'));
+        let url = transport_endpoint(&self.endpoint, "/mcp/tools/call")?;
 
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": self.name,
-                "arguments": input
-            },
-            "id": 1
-        });
+        let request = call_request(&self.name, input);
 
         let response = client
             .post(&url)
@@ -119,15 +113,7 @@ impl McpTool {
             cmd.current_dir(dir);
         }
 
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": self.name,
-                "arguments": input
-            },
-            "id": 1
-        });
+        let request = call_request(&self.name, input);
 
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -179,6 +165,17 @@ pub async fn create_mcp_tools(
         .collect())
 }
 
+/// Builds a `tools/call` request. Arguments are forwarded verbatim, so keys
+/// that collide with routing names such as `tool_name` are preserved.
+fn call_request(name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+        "id": 1
+    })
+}
+
 fn extract_tool_result(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, crate::error::Error> {
@@ -195,6 +192,37 @@ fn extract_tool_result(
     let result = body
         .get("result")
         .ok_or_else(|| crate::error::Error::Mcp("No result in response".to_string()))?;
+
+    // Tool execution errors are reported in-band via `isError`.
+    if result.get("isError").and_then(|e| e.as_bool()) == Some(true) {
+        let text = result
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        return Err(crate::error::Error::Mcp(if text.is_empty() {
+            "MCP tool reported an error without text content".to_string()
+        } else {
+            text
+        }));
+    }
+
+    // Structured content is authoritative when the server provides it
+    // (including structured-only results with no content blocks).
+    if let Some(structured) = result.get("structuredContent")
+        && !structured.is_null()
+    {
+        return Ok(structured.clone());
+    }
 
     // MCP tool results typically have a "content" array
     if let Some(content) = result.get("content") {
@@ -279,5 +307,50 @@ mod tests {
         let tool = McpTool::new(def, "http://localhost:8080", McpTransportType::HttpStream);
         assert_eq!(tool.name, "search");
         assert_eq!(tool.description.as_deref(), Some("Search the web"));
+    }
+
+    #[test]
+    fn test_extract_tool_result_is_error() {
+        let body = serde_json::json!({"result": {"isError": true, "content": [
+            {"type": "text", "text": "  bad input "}, {"type": "image"}, {"type": "text", "text": "second"}]}});
+        let err = extract_tool_result(&body).unwrap_err();
+        assert!(err.to_string().contains("bad input\nsecond"), "{err}");
+    }
+
+    #[test]
+    fn test_extract_tool_result_is_error_without_text() {
+        let body = serde_json::json!({"result": {"isError": true, "content": []}});
+        let err = extract_tool_result(&body).unwrap_err();
+        assert!(err.to_string().contains("without text content"));
+    }
+
+    #[test]
+    fn test_extract_tool_result_structured_only() {
+        let body = serde_json::json!({"result": {"content": [], "structuredContent": {"n": 1}}});
+        assert_eq!(extract_tool_result(&body).unwrap(), serde_json::json!({"n": 1}));
+        let scalar = serde_json::json!({"result": {"structuredContent": 3}});
+        assert_eq!(extract_tool_result(&scalar).unwrap(), serde_json::json!(3));
+    }
+
+    #[test]
+    fn test_extract_tool_result_prefers_structured_content() {
+        let body = serde_json::json!({"result": {
+            "content": [{"type": "text", "text": "ignored"}],
+            "structuredContent": {"k": "v"}}});
+        assert_eq!(extract_tool_result(&body).unwrap(), serde_json::json!({"k": "v"}));
+    }
+
+    #[test]
+    fn test_extract_tool_result_preserves_empty_text() {
+        let body = serde_json::json!({"result": {"content": [{"type": "text", "text": ""}]}});
+        assert_eq!(extract_tool_result(&body).unwrap(), serde_json::json!(""));
+    }
+
+    #[test]
+    fn test_call_request_preserves_routing_named_arguments() {
+        let args = serde_json::json!({"tool_name": "x", "resource_name": "y", "prompt_name": "z"});
+        let req = call_request("search", args.clone());
+        assert_eq!(req["params"]["name"], "search");
+        assert_eq!(req["params"]["arguments"], args);
     }
 }
