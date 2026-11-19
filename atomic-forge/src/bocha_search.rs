@@ -38,7 +38,12 @@ pub struct BochaSearchConfig {
     pub count: usize,
     pub include: Option<String>,
     pub exclude: Option<String>,
+    /// API base URL. Defaults to [`DEFAULT_BASE_URL`]; override for proxies or tests.
+    pub base_url: String,
 }
+
+/// Default BoCha API base URL. Requests go to `{base_url}/v1/web-search`.
+pub const DEFAULT_BASE_URL: &str = "https://api.bochaai.com";
 
 /// Time-filter presets accepted by the BoCha API.
 const FRESHNESS_PRESETS: [&str; 5] = ["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"];
@@ -113,6 +118,7 @@ impl BochaSearchConfig {
             count: 10,
             include: None,
             exclude: None,
+            base_url: DEFAULT_BASE_URL.to_string(),
         }
     }
 }
@@ -125,6 +131,7 @@ pub struct BochaSearchTool {
     count: usize,
     include: Option<String>,
     exclude: Option<String>,
+    endpoint: String,
     client: reqwest::Client,
 }
 
@@ -143,6 +150,7 @@ impl BochaSearchTool {
             count: search_config.count,
             include: search_config.include,
             exclude: search_config.exclude,
+            endpoint: format!("{}/v1/web-search", search_config.base_url.trim_end_matches('/')),
             client: reqwest::Client::new(),
         }
     }
@@ -192,35 +200,49 @@ impl BochaSearchTool {
 
         let response = self
             .client
-            .post("https://api.bochaai.com/v1/web/search")
+            .post(&self.endpoint)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
             .await
             .map_err(|e| Error::Validation(format!("BoCha API request failed: {e}")))?;
 
+        let status = response.status();
+        if !status.is_success() {
+            let details = response.text().await.unwrap_or_default();
+            return Err(Error::Validation(format!(
+                "BoCha API returned {status} for query '{query}': {details}"
+            )));
+        }
+
         let result: serde_json::Value = response
             .json()
             .await
             .map_err(|e| Error::Validation(format!("Failed to parse BoCha response: {e}")))?;
 
-        let items = result
-            .get("web")
-            .and_then(|w| w.get("results"))
+        Ok(Self::parse_results(&result, query, count))
+    }
+
+    /// Extracts results from a BoCha response (`data.webPages.value`), skipping
+    /// entries without a name or URL and keeping at most `count`.
+    fn parse_results(result: &serde_json::Value, query: &str, count: usize) -> Vec<BochaSearchResultItem> {
+        result
+            .pointer("/data/webPages/value")
             .and_then(|r| r.as_array())
             .map(|arr| {
                 arr.iter()
-                    .map(|item| BochaSearchResultItem {
-                        name: item.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                        url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                        snippet: item.get("snippet").and_then(|s| s.as_str()).map(String::from),
-                        query: Some(query.to_string()),
+                    .filter_map(|item| {
+                        Some(BochaSearchResultItem {
+                            name: item.get("name")?.as_str()?.to_string(),
+                            url: item.get("url")?.as_str()?.to_string(),
+                            snippet: item.get("snippet").and_then(|s| s.as_str()).map(String::from),
+                            query: Some(query.to_string()),
+                        })
                     })
+                    .take(count)
                     .collect()
             })
-            .unwrap_or_default();
-
-        Ok(items)
+            .unwrap_or_default()
     }
 }
 
@@ -276,5 +298,81 @@ mod tests {
         assert_eq!(body["query"], "rust");
         assert_eq!(body["count"], 3);
         assert_eq!(body["freshness"], "oneDay");
+    }
+
+    #[test]
+    fn default_endpoint_is_web_search() {
+        let tool = BochaSearchTool::new(BochaSearchConfig::new("k"));
+        assert_eq!(tool.endpoint, "https://api.bochaai.com/v1/web-search");
+    }
+
+    #[test]
+    fn parse_results_reads_data_webpages_value() {
+        let body = serde_json::json!({
+            "code": 200,
+            "data": { "webPages": { "value": [
+                { "name": "A", "url": "https://a.example", "snippet": "sa" },
+                { "name": "no url" },
+                { "name": "B", "url": "https://b.example" },
+                { "name": "C", "url": "https://c.example", "snippet": "sc" }
+            ]}}
+        });
+        let items = BochaSearchTool::parse_results(&body, "rust", 2);
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+        assert_eq!(items[0].snippet.as_deref(), Some("sa"));
+        assert_eq!(items[1].snippet, None);
+        assert!(items.iter().all(|i| i.query.as_deref() == Some("rust")));
+        assert!(BochaSearchTool::parse_results(&serde_json::json!({"web": {"results": []}}), "q", 5).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn tool_for(server: &MockServer) -> BochaSearchTool {
+        let mut cfg = BochaSearchConfig::new("test-key");
+        cfg.base_url = format!("{}/", server.uri());
+        BochaSearchTool::new(cfg)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn posts_query_to_web_search_and_parses_results() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web-search"))
+            .and(header("authorization", "Bearer test-key"))
+            .and(body_partial_json(serde_json::json!({ "query": "rust", "count": 10, "freshness": "noLimit" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200,
+                "data": { "webPages": { "value": [
+                    { "name": "Rust", "url": "https://rust-lang.org", "snippet": "A language" }
+                ]}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let out = tool_for(&server).run(BochaSearchInput { queries: vec!["rust".into()] }).unwrap();
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].url, "https://rust-lang.org");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_success_status_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/web-search"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+            .mount(&server)
+            .await;
+
+        let tool = tool_for(&server);
+        let err = tool.search_query("rust", 10).await.unwrap_err();
+        assert!(err.to_string().contains("401"), "{err}");
+        assert!(err.to_string().contains("bad key"), "{err}");
     }
 }
