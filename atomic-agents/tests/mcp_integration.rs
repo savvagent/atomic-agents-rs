@@ -16,19 +16,23 @@ mod support;
 
 use std::time::Duration;
 
+use atomic_agents::agent::{AgentConfig, AtomicAgent};
 use atomic_agents::error::Error;
 use atomic_agents::mcp::{
-    McpClient, McpPrompt, McpPromptOutput, McpResource, McpResourceContent, McpResourceOutput,
-    McpTool, McpToolInput, McpToolOutput, McpTransport, McpTransportType,
+    McpClient, McpOrchestratorOutput, McpPrompt, McpPromptOutput, McpResource, McpResourceContent,
+    McpResourceOutput, McpTool, McpToolCall, McpToolInput, McpToolOutput, McpToolset, McpTransport,
+    McpTransportType, fetch_mcp_attributes_with_schema,
 };
 use atomic_agents::prompt::Prompt;
 use atomic_agents::resource::Resource;
+use atomic_agents::schema::BasicChatInputSchema;
 use atomic_agents::tool::Tool;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use rmcp::ServiceExt;
 use serde_json::{Map, Value, json};
 use support::legacy_sse_server::{LegacyOptions, spawn_legacy_sse};
+use support::scripted_llm::ScriptedLlm;
 use support::server::{TOOLS_PAGE_SIZE, all_tools};
 use support::{TestServer, spawn_http};
 
@@ -82,6 +86,12 @@ fn scenarios() -> Vec<Scenario> {
         }),
         ("prompt_get_error_redacts_query", || {
             prompt_get_error_redacts_query().boxed()
+        }),
+        ("orchestrator_selects_mcp_tool", || {
+            orchestrator_selects_mcp_tool().boxed()
+        }),
+        ("orchestrator_unknown_tool_dispatch_errors", || {
+            orchestrator_unknown_tool_dispatch_errors().boxed()
         }),
         ("sse_discovery_calls_resources_prompts", || {
             sse_discovery_calls_resources_prompts().boxed()
@@ -843,4 +853,79 @@ async fn sse_cancelled_connect_closes_stream() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     legacy.shutdown().await;
+}
+
+/// Discovers the HTTP server's tools, minus `stats`, as an orchestrator toolset.
+async fn orchestrator_toolset(base: &str) -> (McpClient, McpToolset) {
+    let (client, tools, schema) =
+        fetch_mcp_attributes_with_schema(&format!("{base}/mcp"), McpTransportType::HttpStream)
+            .await
+            .expect("fetch tools and schema");
+    assert_eq!(
+        schema["properties"]["tool_parameters"]["anyOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(tools.len())
+    );
+    let tools = tools
+        .into_iter()
+        .filter(|t| t.mcp_name() != "stats")
+        .collect();
+    (client, McpToolset::new(tools).expect("toolset"))
+}
+
+async fn orchestrator_selects_mcp_tool() {
+    let http = spawn_http(TestServer::default()).await;
+    let (client, toolset) = orchestrator_toolset(&http.base).await;
+
+    let (llm, requests) =
+        ScriptedLlm::new([json!({"tool_parameters": {"tool_name": "add", "a": 2, "b": 3}})]);
+    let agent = AtomicAgent::<BasicChatInputSchema, McpOrchestratorOutput, _>::new(
+        AgentConfig::new(llm, "test-model").with_output_schema(toolset.schema()),
+    );
+    let out = agent
+        .run_async(Some(BasicChatInputSchema {
+            chat_message: "add 2 and 3".into(),
+        }))
+        .await
+        .expect("agent run");
+    assert_eq!(out.tool_parameters.tool_name, "add");
+    assert_eq!(
+        Value::Object(out.tool_parameters.arguments.clone()),
+        json!({"a": 2, "b": 3})
+    );
+
+    let result = toolset
+        .dispatch(&out.tool_parameters)
+        .await
+        .expect("dispatch");
+    assert_eq!(result["sum"].as_f64(), Some(5.0), "{result}");
+
+    {
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let tools = recorded[0].tools.as_ref().expect("tools in request");
+        assert_eq!(tools[0].function.parameters, toolset.schema());
+    }
+    let names: Vec<_> = toolset.tools().iter().map(|t| t.mcp_name()).collect();
+    assert!(!names.contains(&"stats"));
+    client.close().await.expect("close");
+    http.shutdown().await;
+}
+
+async fn orchestrator_unknown_tool_dispatch_errors() {
+    let http = spawn_http(TestServer::default()).await;
+    let (client, toolset) = orchestrator_toolset(&http.base).await;
+    assert!(toolset.get("add").is_some());
+    assert!(toolset.get("stats").is_none());
+
+    for name in ["nope", "stats"] {
+        let call = McpToolCall {
+            tool_name: name.to_string(),
+            arguments: Map::new(),
+        };
+        assert_err_contains(toolset.dispatch(&call).await, "unknown MCP tool");
+    }
+    client.close().await.expect("close");
+    http.shutdown().await;
 }

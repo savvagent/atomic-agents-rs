@@ -9,6 +9,7 @@
 //! - [`McpTransport`] / [`McpTransportType`] - how to reach the server
 //! - [`McpClient`] - the session: discovery and `tools/call`
 //! - [`McpTool`] - a discovered tool implementing [`Tool`](crate::tool::Tool)
+//! - [`McpToolset`] / [`orchestrator_schema`] - one output schema over many tools, plus dispatch
 //! - [`McpResource`] - a discovered resource or template implementing [`Resource`](crate::resource::Resource)
 //! - [`McpToolDefinition`], [`McpResourceDefinition`], [`McpPromptDefinition`] - discovered metadata
 //!
@@ -28,6 +29,7 @@
 mod client;
 mod definitions;
 mod legacy_sse;
+mod orchestrator;
 mod prompt;
 mod resource;
 mod result;
@@ -37,6 +39,11 @@ mod transport;
 pub use client::{McpClient, McpPaginationError};
 pub use definitions::{
     McpPromptArgument, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
+};
+pub use orchestrator::{
+    McpOrchestratorOutput, McpToolCall, McpToolset, create_mcp_orchestrator_schema,
+    fetch_mcp_attributes_with_schema, fetch_mcp_prompts, fetch_mcp_resources, fetch_mcp_tools,
+    orchestrator_schema,
 };
 pub use prompt::{McpPrompt, McpPromptMessage, McpPromptOutput};
 pub use resource::{McpResource, McpResourceContent, McpResourceOutput};
