@@ -94,6 +94,12 @@ impl WebpageScraperTool {
         let final_url = response.url().clone();
         let domain = final_url.host_str().unwrap_or("").to_string();
 
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
         // Stream the body so oversized responses are rejected without buffering them fully.
         if response.content_length().is_some_and(|l| l > self.max_content_length as u64) {
             return Err(too_large(self.max_content_length));
@@ -109,7 +115,7 @@ impl WebpageScraperTool {
             }
             body.extend_from_slice(&chunk);
         }
-        let html = String::from_utf8_lossy(&body).into_owned();
+        let html = decode_body(&body, content_type.as_deref());
 
         let document = scraper::Html::parse_document(&html);
 
@@ -188,6 +194,42 @@ impl Tool for WebpageScraperTool {
             tokio::runtime::Handle::current().block_on(self.scrape(&input.url, input.include_links))
         })
     }
+}
+
+/// Decodes an HTML body to text (upstream #418).
+///
+/// Precedence: byte-order mark, then the `charset` parameter of the
+/// `Content-Type` header, then a `<meta charset>` / `http-equiv` declaration
+/// in the first 1024 bytes, then UTF-8. Invalid sequences are replaced.
+fn decode_body(body: &[u8], content_type: Option<&str>) -> String {
+    let declared = content_type
+        .and_then(charset_param)
+        .or_else(|| sniff_meta_charset(&body[..body.len().min(1024)]))
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    // `decode` honours a BOM over the declared encoding.
+    let (text, _, _) = declared.decode(body);
+    text.into_owned()
+}
+
+fn charset_param(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| value.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+fn sniff_meta_charset(head: &[u8]) -> Option<String> {
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    let idx = head.find("charset=")?;
+    let rest = head[idx + "charset=".len()..].trim_start_matches(['"', '\'']);
+    let label: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        .collect();
+    (!label.is_empty()).then_some(label)
 }
 
 fn too_large(max: usize) -> Error {
@@ -295,6 +337,31 @@ mod network_tests {
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn decodes_using_content_type_charset() {
+        // "café" in ISO-8859-1 / windows-1252.
+        let body = b"<p>caf\xe9</p>";
+        assert_eq!(decode_body(body, Some("text/html; charset=ISO-8859-1")), "<p>café</p>");
+        assert_eq!(decode_body(body, Some("text/html; Charset=\"windows-1252\"")), "<p>café</p>");
+    }
+
+    #[test]
+    fn decodes_using_meta_charset_when_header_lacks_one() {
+        let body = b"<html><head><meta charset=\"windows-1252\"></head><p>caf\xe9</p></html>";
+        assert!(decode_body(body, Some("text/html")).contains("café"));
+        let body = b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=shift_jis\">\x82\xa0";
+        assert!(decode_body(body, None).ends_with('あ'));
+    }
+
+    #[test]
+    fn defaults_to_utf8_and_honours_bom() {
+        assert_eq!(decode_body("café".as_bytes(), None), "café");
+        assert_eq!(decode_body(b"caf\xe9", Some("text/html; charset=bogus")), "caf\u{fffd}");
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice("café".as_bytes());
+        assert_eq!(decode_body(&bom, Some("text/html; charset=ISO-8859-1")), "café");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn oversized_body_is_rejected() {
