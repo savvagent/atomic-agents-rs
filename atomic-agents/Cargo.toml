@@ -11,7 +11,7 @@ documentation = "https://docs.rs/atomic-agents"
 description = "A lightweight, modular framework for building AI agent pipelines with structured LLM outputs"
 
 [dependencies]
-atomic-agents-macros = { version = "0.2.0", path = "../atomic-agents-macros" }
+atomic-agents-macros = { version = "0.2.1", path = "../atomic-agents-macros" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
@@ -51,6 +51,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 wiremock = "0.6"
 shlex = "1.3"
 atomic-forge = { path = "../atomic-forge" }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["openai"]

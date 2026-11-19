@@ -1,12 +1,15 @@
 pub mod types;
 
 #[cfg(feature = "openai")]
+#[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
 pub mod openai;
 
 #[cfg(feature = "anthropic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "anthropic")))]
 pub mod anthropic;
 
 #[cfg(feature = "google")]
+#[cfg_attr(docsrs, doc(cfg(feature = "google")))]
 pub mod google;
 
 use std::pin::Pin;
