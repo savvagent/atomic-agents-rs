@@ -1,5 +1,16 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use crate::client::types::ChatMessage;
 use crate::error::Error;
+
+/// Tokenizers cached per model name; `None` records a model without a BPE.
+type TokenizerCache = Mutex<HashMap<String, Option<Arc<tiktoken_rs::CoreBPE>>>>;
+
+fn tokenizer_cache() -> &'static TokenizerCache {
+    static CACHE: OnceLock<TokenizerCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
 
 /// Result of a token count operation with breakdown.
 #[derive(Clone, Debug)]
@@ -26,26 +37,29 @@ pub struct TokenCountResult {
 pub struct TokenCounter;
 
 impl TokenCounter {
+    /// Tokens added once per request: every reply is primed with
+    /// `<im_start>assistant`.
+    pub const REPLY_PRIMING_TOKENS: usize = 2;
+
     /// Counts tokens in a list of messages.
     pub fn count_messages(model: &str, messages: &[ChatMessage]) -> Result<usize, Error> {
-        let mut total = 0;
+        let mut total = Self::REPLY_PRIMING_TOKENS;
         for msg in messages {
-            // Per-message overhead (role tokens, separators)
-            total += 4; // <im_start>{role}\n ... <im_end>\n
-
-            // Role tokens
-            total += 1;
-
-            // Content tokens
-            let content_str = match &msg.content {
-                serde_json::Value::String(s) => s.clone(),
-                other => serde_json::to_string(other).unwrap_or_default(),
-            };
-            total += Self::count_text(model, &content_str)?;
+            total += Self::count_message(model, msg)?;
         }
-        // Every reply is primed with <im_start>assistant
-        total += 2;
         Ok(total)
+    }
+
+    /// Counts the tokens of one message including its per-message framing,
+    /// but not the per-request reply priming.
+    pub fn count_message(model: &str, msg: &ChatMessage) -> Result<usize, Error> {
+        // Per-message overhead (<im_start>{role}\n ... <im_end>\n) plus the role token.
+        let overhead = 4 + 1;
+        let content_str = match &msg.content {
+            serde_json::Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
+            other => std::borrow::Cow::Owned(serde_json::to_string(other).unwrap_or_default()),
+        };
+        Ok(overhead + Self::count_text(model, &content_str)?)
     }
 
     /// Counts tokens in a text string.
@@ -96,16 +110,10 @@ impl TokenCounter {
             Self::count_messages(model, system_messages)?
         };
 
-        let history = if history_messages.is_empty() {
-            0
-        } else {
-            let all: Vec<ChatMessage> = system_messages
-                .iter()
-                .chain(history_messages)
-                .cloned()
-                .collect();
-            Self::count_messages(model, &all)?.saturating_sub(system_prompt)
-        };
+        let mut history = Self::history_framing(!system_messages.is_empty(), history_messages.len());
+        for msg in history_messages {
+            history += Self::count_message(model, msg)?;
+        }
 
         let tools = match tools_json {
             Some(json) => Self::count_text(model, json)?,
@@ -127,9 +135,26 @@ impl TokenCounter {
         })
     }
 
-    fn get_tokenizer(model: &str) -> Option<tiktoken_rs::CoreBPE> {
-        // Try to get the encoding for the model
-        tiktoken_rs::get_bpe_from_model(model).ok()
+    /// Request framing attributed to history: the reply priming is charged to
+    /// the system prompt when system messages exist, otherwise to history
+    /// (when there is any).
+    pub fn history_framing(has_system: bool, history_len: usize) -> usize {
+        if has_system || history_len == 0 {
+            0
+        } else {
+            Self::REPLY_PRIMING_TOKENS
+        }
+    }
+
+    /// Returns the tokenizer for `model`, building it at most once per model.
+    fn get_tokenizer(model: &str) -> Option<Arc<tiktoken_rs::CoreBPE>> {
+        let mut cache = tokenizer_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get(model) {
+            return entry.clone();
+        }
+        let bpe = tiktoken_rs::get_bpe_from_model(model).ok().map(Arc::new);
+        cache.insert(model.to_string(), bpe.clone());
+        bpe
     }
 }
 

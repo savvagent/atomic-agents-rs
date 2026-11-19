@@ -219,10 +219,18 @@ impl ChatHistory {
     }
 
     /// Removes all messages with the given turn ID.
+    ///
+    /// If the deleted turn was the current turn, the current turn ID moves to
+    /// the turn of the last remaining message, or to `None` when the history
+    /// is empty (matching upstream `delete_turn_id`). Later messages are then
+    /// never filed under the deleted, orphaned ID.
     pub fn delete_turn(&mut self, turn_id: &str) {
         self.history.retain(|msg| {
             msg.turn_id.as_deref() != Some(turn_id)
         });
+        if self.current_turn_id.as_deref() == Some(turn_id) {
+            self.current_turn_id = self.history.last().and_then(|m| m.turn_id.clone());
+        }
     }
 
     /// Deep-copies this chat history.
@@ -525,6 +533,29 @@ mod tests {
         assert_eq!(history.get_history()[0]["content"], "keep me");
         assert_eq!(history.max_messages, Some(5));
         assert!(history.current_turn_id().is_some());
+    }
+
+    #[test]
+    fn test_delete_current_turn_resets_current_turn_id() {
+        let mut history = ChatHistory::new(None);
+        let first = history.initialize_turn();
+        history.add_raw_message(Role::User, MessageContent::text("a"));
+        let second = history.initialize_turn();
+        history.add_raw_message(Role::User, MessageContent::text("b"));
+
+        history.delete_turn(&second);
+        assert_eq!(history.current_turn_id(), Some(first.as_str()));
+        history.add_raw_message(Role::User, MessageContent::text("c"));
+        assert_eq!(history.messages()[1].turn_id.as_deref(), Some(first.as_str()));
+
+        // Deleting a non-current turn leaves the current ID alone.
+        let third = history.initialize_turn();
+        history.add_raw_message(Role::User, MessageContent::text("d"));
+        history.delete_turn(&first);
+        assert_eq!(history.current_turn_id(), Some(third.as_str()));
+
+        history.delete_turn(&third);
+        assert_eq!(history.current_turn_id(), None);
     }
 
     #[test]

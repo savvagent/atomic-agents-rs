@@ -379,39 +379,112 @@ impl<I: IOSchema, O: IOSchema, C: LlmClient> AtomicAgent<I, O, C> {
         };
         config::validate_max_context_tokens(max)?;
 
-        loop {
-            let result = self.get_context_token_count()?;
-            if result.total <= max {
-                return Ok(());
-            }
+        // Count every component once, then subtract trimmed turns incrementally.
+        let model = self.model.as_str();
+        let system_messages = self.build_system_messages();
+        let system_prompt = if system_messages.is_empty() {
+            0
+        } else {
+            TokenCounter::count_messages(model, &system_messages)?
+        };
+        let tools = match self.build_tools_definition() {
+            Some(tools) => TokenCounter::count_text(model, &serde_json::to_string(&tools)?)?,
+            None => 0,
+        };
 
+        let outcome = {
             let mut history = self.history.lock().unwrap();
-            let current = history.current_turn_id().map(str::to_string);
-            let oldest = history
-                .turn_ids()
-                .into_iter()
-                .find(|id| Some(id) != current.as_ref());
+            let mut messages = self.counted_history(history.as_ref(), model)?;
+            let outcome;
+            loop {
+                let history_tokens = TokenCounter::history_framing(
+                    !system_messages.is_empty(),
+                    messages.len(),
+                ) + messages.iter().map(|(_, c)| c).sum::<usize>();
+                let total = system_prompt + history_tokens + tools;
+                if total <= max {
+                    outcome = Ok(());
+                    break;
+                }
 
-            match oldest {
-                Some(turn_id) => {
-                    history.delete_turn(&turn_id);
-                    tracing::warn!(
-                        max_context_tokens = max,
-                        turn_id = turn_id.as_str(),
-                        total_tokens = result.total,
-                        "Context exceeded max_context_tokens; trimmed oldest turn"
-                    );
-                }
-                None => {
-                    return Err(Error::TokenCount(format!(
+                let current = history.current_turn_id().map(str::to_string);
+                let oldest = history
+                    .turn_ids()
+                    .into_iter()
+                    .find(|id| Some(id) != current.as_ref());
+                let Some(turn_id) = oldest else {
+                    outcome = Err(Error::TokenCount(format!(
                         "max_context_tokens ({max}) is smaller than the minimum required \
-                         for a single turn ({} tokens). Increase max_context_tokens or \
-                         reduce the system prompt size.",
-                        result.total
+                         for a single turn ({total} tokens). Increase max_context_tokens or \
+                         reduce the system prompt size."
                     )));
+                    break;
+                };
+
+                history.delete_turn(&turn_id);
+                tracing::warn!(
+                    max_context_tokens = max,
+                    turn_id = turn_id.as_str(),
+                    total_tokens = total,
+                    "Context exceeded max_context_tokens; trimmed oldest turn"
+                );
+                // Drop the deleted messages' cached counts. Remaining messages
+                // keep their relative order, so a greedy match finds the removed ones.
+                let remaining = self.build_history_messages(history.as_ref());
+                let mut kept = Vec::with_capacity(remaining.len());
+                let mut old = messages.into_iter().peekable();
+                for msg in remaining {
+                    while let Some((m, _)) = old.peek() {
+                        if m.role == msg.role && m.content == token_count_content(msg.content.clone()) {
+                            break;
+                        }
+                        old.next();
+                    }
+                    if let Some(entry) = old.next() {
+                        kept.push(entry);
+                    }
                 }
+                messages = kept;
             }
-        }
+            let history_tokens = TokenCounter::history_framing(
+                !system_messages.is_empty(),
+                messages.len(),
+            ) + messages.iter().map(|(_, c)| c).sum::<usize>();
+            (outcome, system_prompt + history_tokens + tools, history_tokens)
+        };
+
+        let (outcome, total, history_tokens) = outcome;
+        let max_tokens = TokenCounter::max_tokens(model);
+        self.dispatch_token_counted(&TokenCountResult {
+            total,
+            system_prompt,
+            history: history_tokens,
+            tools,
+            model: model.to_string(),
+            max_tokens,
+            utilization: max_tokens.map(|m| total as f64 / m as f64),
+        });
+        outcome
+    }
+
+    /// Builds the history messages (flattened for counting) paired with
+    /// their individual token counts.
+    fn counted_history(
+        &self,
+        history: &dyn BaseChatHistory,
+        model: &str,
+    ) -> Result<Vec<(ChatMessage, usize)>> {
+        self.build_history_messages(history)
+            .into_iter()
+            .map(|m| {
+                let msg = ChatMessage {
+                    role: m.role,
+                    content: token_count_content(m.content),
+                };
+                let cost = TokenCounter::count_message(model, &msg)?;
+                Ok((msg, cost))
+            })
+            .collect()
     }
 
     fn count_context_tokens(&self, history: &dyn BaseChatHistory) -> Result<TokenCountResult> {
@@ -614,15 +687,35 @@ impl<'a, O: IOSchema> StreamAccumulator<'a, O> {
     }
 
     fn fail(&mut self) {
+        if self.finished {
+            return;
+        }
         self.finished = true;
         discard_turn(self.history, self.turn_id.as_deref());
+    }
+
+    /// Records the assistant reply and keeps the user turn. Runs at most once.
+    fn commit(&mut self, output: &O) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if let Ok(mut history) = self.history.lock() {
+            history.add_message(Role::Custom(self.assistant_role.clone()), output);
+        }
     }
 }
 
 impl<O: IOSchema> Drop for StreamAccumulator<'_, O> {
+    /// A stream dropped early still keeps its turn when the output received
+    /// so far is already a complete, valid `O`; otherwise the turn is discarded.
     fn drop(&mut self) {
-        if !self.finished {
-            self.fail();
+        if self.finished {
+            return;
+        }
+        match serde_json::from_str::<O>(&self.accumulated) {
+            Ok(output) => self.commit(&output),
+            Err(_) => self.fail(),
         }
     }
 }
@@ -653,10 +746,7 @@ impl<O: IOSchema> Stream for StreamAccumulator<'_, O> {
             }
             Poll::Ready(None) => match serde_json::from_str::<O>(&this.accumulated) {
                 Ok(output) => {
-                    this.finished = true;
-                    if let Ok(mut history) = this.history.lock() {
-                        history.add_message(Role::Custom(this.assistant_role.clone()), &output);
-                    }
+                    this.commit(&output);
                     Poll::Ready(None)
                 }
                 Err(e) => {
@@ -995,6 +1085,109 @@ mod tests {
         stream.next().await.unwrap().unwrap();
         drop(stream);
         assert_eq!(agent.history().message_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_stream_dropped_after_complete_output_commits_turn() {
+        let client = MockClient::new("")
+            .with_stream_chunks(&[r#"{"chat_"#, r#"message": "x"}"#, "  "]);
+        let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(
+            AgentConfig::new(client, "gpt-4o"),
+        );
+        let mut stream = agent.run_async_stream(Some(input("hi"))).await.unwrap();
+        let mut parsed = None;
+        while let Some(p) = stream.next().await {
+            let p = p.unwrap();
+            if p.is_complete() {
+                parsed = p.parsed;
+                break;
+            }
+        }
+        drop(stream);
+        assert_eq!(parsed.unwrap().chat_message, "x");
+        // User message kept and assistant reply recorded, exactly once.
+        assert_eq!(agent.history().message_count(), 2);
+    }
+
+    fn naive_trimmed_ids(agent: &TestAgent, max: usize) -> Vec<String> {
+        let mut copy = agent.history().boxed_copy();
+        loop {
+            if agent.count_context_tokens(copy.as_ref()).unwrap().total <= max {
+                break;
+            }
+            let current = copy.current_turn_id().map(str::to_string);
+            match copy.turn_ids().into_iter().find(|id| Some(id) != current.as_ref()) {
+                Some(id) => copy.delete_turn(&id),
+                None => break,
+            }
+        }
+        copy.turn_ids()
+    }
+
+    fn naive_fits(agent: &TestAgent, max: usize) -> bool {
+        let h = agent.history();
+        agent.count_context_tokens(h.as_ref()).unwrap().total <= max
+    }
+
+    type TestAgent = AtomicAgent<BasicChatInputSchema, BasicChatOutputSchema, MockClient>;
+
+    #[tokio::test]
+    async fn test_trim_context_matches_naive_recount_and_fires_hook_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let client = MockClient::new(r#"{"chat_message": "ok"}"#);
+        let agent = TestAgent::new(AgentConfig::new(client, "gpt-4o"));
+        for i in 0..5 {
+            agent
+                .run_async(Some(input(&format!("a fairly long older message number {i}"))))
+                .await
+                .unwrap();
+        }
+        let one_turn = agent.get_context_token_count().unwrap().total / 5;
+        let mut trimmed_any = false;
+        for budget in [10_000, one_turn * 3, one_turn * 2, one_turn + 1] {
+            let mut probe = agent.history().boxed_copy();
+            probe.initialize_turn();
+            let mut candidate = TestAgent::new(AgentConfig::new(
+                MockClient::new(r#"{"chat_message": "ok"}"#),
+                "gpt-4o",
+            ));
+            *candidate.history.lock().unwrap() = probe;
+            candidate.max_context_tokens = Some(budget);
+            candidate.history.lock().unwrap().add_raw_message(
+                Role::User,
+                MessageContent::text("newest"),
+            );
+            let expected = naive_trimmed_ids(&candidate, budget);
+
+            let fired = Arc::new(AtomicUsize::new(0));
+            let f = fired.clone();
+            candidate.register_hook(
+                HookEvent::TokenCounted,
+                Arc::new(move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
+            let result = candidate.trim_context();
+            assert_eq!(result.is_ok(), expected.len() > 1 || naive_fits(&candidate, budget));
+            trimmed_any |= candidate.history().turn_ids().len() < 6;
+            assert_eq!(candidate.history().turn_ids(), expected, "budget {budget}");
+            assert_eq!(fired.load(Ordering::SeqCst), 1);
+        }
+        assert!(trimmed_any, "at least one budget must trim");
+    }
+
+    #[tokio::test]
+    async fn test_discarded_turn_resets_current_turn_id() {
+        let agent = ok_agent();
+        agent.run_async(Some(input("keep"))).await.unwrap();
+        let kept = agent.history().current_turn_id().map(str::to_string);
+
+        let turn = agent.begin_turn(Some(&input("doomed")));
+        agent.discard_turn(turn.as_deref());
+        assert_eq!(agent.history().current_turn_id(), kept.as_deref());
+        assert_eq!(agent.history().message_count(), 2);
     }
 
     #[tokio::test]
