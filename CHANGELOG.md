@@ -27,6 +27,7 @@
 - URL userinfo, query and fragment are redacted from MCP error text; header values are marked sensitive.
 - Legacy SSE hardening: same-origin POST endpoint, no redirects, 30 s connect budget, 16 MiB per-event cap.
 - The orchestrator schema does not require `serde_json/preserve_order`; `tool_name` is listed first in `required` only.
+- TLS for the Streamable HTTP transport uses native-tls (rmcp's `reqwest-native-tls`), the same backend as this crate's reqwest 0.12 default. The `mcp` feature pulls in no rustls, aws-lc-rs or aws-lc-sys, so it cannot change which rustls crypto provider a downstream build selects.
 
 ### Known limitations
 

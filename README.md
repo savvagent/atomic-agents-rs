@@ -190,6 +190,7 @@ Notes:
 - `McpTool::run` blocks, so it needs a multi-threaded tokio runtime; use `McpTool::call` (async) otherwise.
 - `input_required` and task replies from a server are reported as explicit `Error::Mcp` messages; they are not supported.
 - URL userinfo, query strings and fragments are redacted from error text.
+- HTTPS uses native-tls (OpenSSL on Linux, the platform TLS stack elsewhere), the same backend as the crate's other HTTP clients; the `mcp` feature adds no rustls.
 - The legacy SSE transport only accepts a same-origin POST endpoint, never follows redirects, allows 30 s to connect and caps each event at 16 MiB.
 - The orchestrator schema is deterministic (sorted keys) and lists `tool_name` first in `required`; it does not rely on property order.
 
