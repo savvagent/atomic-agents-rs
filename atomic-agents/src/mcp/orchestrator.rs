@@ -109,27 +109,113 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-/// Rewrites `#/$defs/X...` and `#/definitions/X...` refs to `#/$defs/{prefix}__X...`.
-fn rewrite_refs(value: &mut Value, prefix: &str) {
-    match value {
-        Value::Object(map) => {
-            for (key, v) in map.iter_mut() {
-                match (key.as_str(), &*v) {
-                    ("$ref", Value::String(r)) => {
-                        let rest = r
-                            .strip_prefix("#/$defs/")
-                            .or_else(|| r.strip_prefix("#/definitions/"));
-                        if let Some(rest) = rest {
-                            *v = Value::String(format!("#/$defs/{prefix}__{rest}"));
+/// Escapes a string for use as one JSON-pointer reference token.
+fn escape_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+/// Reverses [`escape_token`].
+fn unescape_token(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// Rewrites refs into one tool's own `$defs`/`definitions` so they point at the
+/// hoisted `{prefix}__{def}` entries of the root `$defs`.
+struct RefRewriter<'a> {
+    tool: &'a str,
+    prefix: &'a str,
+    defs: &'a std::collections::HashSet<String>,
+}
+
+impl RefRewriter<'_> {
+    fn unsupported(&self, reference: &str) -> Error {
+        Error::Mcp(format!(
+            "tool {:?}: unsupported $ref {reference:?} (only refs into the tool's own $defs/definitions are supported)",
+            self.tool
+        ))
+    }
+
+    fn rewrite_ref(&self, reference: &str) -> Result<Option<String>> {
+        if !reference.starts_with('#') {
+            // Absolute or relative URI: not ours to touch.
+            return Ok(None);
+        }
+        let rest = reference
+            .strip_prefix("#/$defs/")
+            .or_else(|| reference.strip_prefix("#/definitions/"))
+            .ok_or_else(|| self.unsupported(reference))?;
+        let (token, suffix) = match rest.find('/') {
+            Some(i) => rest.split_at(i),
+            None => (rest, ""),
+        };
+        let name = unescape_token(token);
+        if !self.defs.contains(&name) {
+            return Err(self.unsupported(reference));
+        }
+        let key = format!("{}__{name}", self.prefix);
+        Ok(Some(format!("#/$defs/{}{suffix}", escape_token(&key))))
+    }
+
+    /// Walks a schema object. Keywords whose values are instance data are
+    /// skipped, and maps keyed by user-chosen names have each value walked as
+    /// a schema, so a property called `default` is still rewritten.
+    fn walk_schema(&self, schema: &mut Map<String, Value>) -> Result<()> {
+        for (key, value) in schema.iter_mut() {
+            match key.as_str() {
+                "enum" | "const" | "default" | "examples" => {}
+                "$ref" => {
+                    if let Value::String(r) = &*value
+                        && let Some(new) = self.rewrite_ref(r)?
+                    {
+                        *value = Value::String(new);
+                    }
+                }
+                "properties" | "patternProperties" | "$defs" | "definitions"
+                | "dependentSchemas" => {
+                    if let Value::Object(children) = value {
+                        for child in children.values_mut() {
+                            self.walk_value(child)?;
                         }
                     }
-                    _ => rewrite_refs(v, prefix),
+                }
+                _ => self.walk_value(value)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_value(&self, value: &mut Value) -> Result<()> {
+        match value {
+            Value::Object(map) => self.walk_schema(map),
+            Value::Array(items) => items.iter_mut().try_for_each(|v| self.walk_value(v)),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Moves `$defs` and `definitions` out of `schema` into one map, refusing a
+/// name present in both.
+fn take_defs(tool: &str, schema: &mut Map<String, Value>) -> Result<Map<String, Value>> {
+    let mut defs = Map::new();
+    for key in ["$defs", "definitions"] {
+        if let Some(Value::Object(found)) = schema.remove(key) {
+            for (name, def) in found {
+                if defs.insert(name.clone(), def).is_some() {
+                    return Err(Error::Mcp(format!(
+                        "tool {tool:?}: definition {name:?} appears in both $defs and definitions"
+                    )));
                 }
             }
         }
-        Value::Array(items) => items.iter_mut().for_each(|v| rewrite_refs(v, prefix)),
-        _ => {}
     }
+    Ok(defs)
+}
+
+/// The arguments to send to the tool: everything except `tool_name`.
+fn forwarded_arguments(call: &McpToolCall) -> Map<String, Value> {
+    let mut arguments = call.arguments.clone();
+    arguments.remove("tool_name");
+    arguments
 }
 
 /// Pure schema construction over `(name, description, input_schema)` triples.
@@ -139,18 +225,41 @@ pub(crate) fn build_orchestrator_schema(entries: &[(&str, Option<&str>, &Value)]
             "orchestrator schema needs at least one tool".to_string(),
         ));
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    // sanitized prefix -> (first tool using it, whether that tool has defs)
+    let mut prefixes: HashMap<String, (&str, bool)> = HashMap::new();
     let mut variants = Vec::with_capacity(entries.len());
     let mut root_defs = Map::new();
 
     for &(name, description, input_schema) in entries {
-        if !seen.insert(name) {
+        if !names.insert(name) {
             return Err(Error::Mcp(format!("duplicate MCP tool name {name:?}")));
         }
+        // A `true` (or otherwise non-object) schema accepts anything: no arguments declared.
         let mut schema = match input_schema {
             Value::Object(map) => map.clone(),
             _ => Map::new(),
         };
+        if let Some(ty) = schema.get("type")
+            && ty != "object"
+        {
+            return Err(Error::Mcp(format!(
+                "tool {name:?}: input schema type must be \"object\", got {ty}"
+            )));
+        }
+        let mut defs = take_defs(name, &mut schema)?;
+        let prefix = sanitize(name);
+        let has_defs = !defs.is_empty();
+        if let Some(&(other, other_has_defs)) = prefixes.get(&prefix) {
+            if has_defs || other_has_defs {
+                return Err(Error::Mcp(format!(
+                    "tools {other:?} and {name:?} both map to schema prefix {prefix:?}; rename one"
+                )));
+            }
+        } else {
+            prefixes.insert(prefix.clone(), (name, has_defs));
+        }
+
         let mut properties = match schema.remove("properties") {
             Some(Value::Object(p)) => p,
             _ => Map::new(),
@@ -161,28 +270,29 @@ pub(crate) fn build_orchestrator_schema(entries: &[(&str, Option<&str>, &Value)]
             )));
         }
 
-        let prefix = sanitize(name);
-        let mut defs = Map::new();
-        for key in ["$defs", "definitions"] {
-            if let Some(Value::Object(found)) = schema.remove(key) {
-                defs.extend(found);
+        // Rewrite refs everywhere the tool's own schema can hold one.
+        let def_names: std::collections::HashSet<String> = defs.keys().cloned().collect();
+        let rewriter = RefRewriter {
+            tool: name,
+            prefix: &prefix,
+            defs: &def_names,
+        };
+        rewriter.walk_schema(&mut schema)?;
+        for property in properties.values_mut() {
+            rewriter.walk_value(property)?;
+        }
+        for def in defs.values_mut() {
+            rewriter.walk_value(def)?;
+        }
+        for (def_name, def) in std::mem::take(&mut defs) {
+            let key = format!("{prefix}__{def_name}");
+            if root_defs.insert(key.clone(), def).is_some() {
+                return Err(Error::Mcp(format!(
+                    "tool {name:?}: definition key {key:?} collides with another tool's definition"
+                )));
             }
         }
-        let mut body = Value::Object(schema);
-        let mut props_value = Value::Object(properties);
-        rewrite_refs(&mut body, &prefix);
-        rewrite_refs(&mut props_value, &prefix);
-        for (def_name, mut def) in defs {
-            rewrite_refs(&mut def, &prefix);
-            root_defs.insert(format!("{prefix}__{def_name}"), def);
-        }
-        let Value::Object(mut schema) = body else {
-            unreachable!("body was built from a map")
-        };
-        let Value::Object(old_properties) = props_value else {
-            unreachable!("properties was built from a map")
-        };
-        properties = Map::new();
+
         properties.insert(
             "tool_name".to_string(),
             json!({
@@ -191,7 +301,6 @@ pub(crate) fn build_orchestrator_schema(entries: &[(&str, Option<&str>, &Value)]
                 "description": format!("Required identifier for the {name} tool."),
             }),
         );
-        properties.extend(old_properties);
 
         let mut required = vec![Value::String("tool_name".to_string())];
         if let Some(Value::Array(existing)) = schema.remove("required") {
@@ -283,10 +392,15 @@ impl McpToolset {
     /// Errors when the tool is not in this set (including a model-invented
     /// name) or when the call itself fails.
     pub async fn dispatch(&self, call: &McpToolCall) -> Result<Value> {
-        let tool = self
-            .get(&call.tool_name)
-            .ok_or_else(|| Error::Mcp(format!("unknown MCP tool {:?}", call.tool_name)))?;
-        tool.call(call.arguments.clone()).await
+        let tool = self.get(&call.tool_name).ok_or_else(|| {
+            let available: Vec<&str> = self.tools.iter().map(|t| t.mcp_name()).collect();
+            Error::Mcp(format!(
+                "unknown MCP tool {:?}; available: {}",
+                call.tool_name,
+                available.join(", ")
+            ))
+        })?;
+        tool.call(forwarded_arguments(call)).await
     }
 }
 
@@ -393,6 +507,128 @@ mod tests {
                 json!("#/$defs/geo_tool__Inner/x")
             );
         }
+    }
+
+    fn err_of(entries: &[(&str, Option<&str>, &Value)]) -> String {
+        build_orchestrator_schema(entries).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn colliding_prefixes_with_defs_error() {
+        let with_defs = json!({"type": "object", "$defs": {"P": {"type": "string"}}});
+        let plain = obj();
+        let msg = err_of(&[("a-b", None, &with_defs), ("a_b", None, &plain)]);
+        assert!(
+            msg.contains(r#"tools "a-b" and "a_b" both map to schema prefix "a_b"; rename one"#),
+            "{msg}"
+        );
+        // Either order, and defs on the second tool.
+        assert!(err_of(&[("a_b", None, &plain), ("a-b", None, &with_defs)]).contains("prefix"));
+        // Colliding prefixes without any defs are harmless.
+        build_orchestrator_schema(&[("a-b", None, &plain), ("a_b", None, &plain)]).unwrap();
+    }
+
+    #[test]
+    fn same_def_in_defs_and_definitions_errors() {
+        let s = json!({"$defs": {"P": {}}, "definitions": {"P": {}}});
+        let msg = err_of(&[("t", None, &s)]);
+        assert!(msg.contains("P") && msg.contains("both"), "{msg}");
+    }
+
+    #[test]
+    fn escaped_def_names_are_resolved_and_reescaped() {
+        let s = json!({
+            "properties": {
+                "a": {"$ref": "#/$defs/x~1y"},
+                "b": {"$ref": "#/definitions/m~0n/properties/z"},
+            },
+            "$defs": {"x/y": {"type": "string"}},
+            "definitions": {"m~n": {"type": "object"}},
+        });
+        let schema = build_orchestrator_schema(&[("t", None, &s)]).unwrap();
+        let props = &schema["properties"]["tool_parameters"]["anyOf"][0]["properties"];
+        assert_eq!(props["a"]["$ref"], json!("#/$defs/t__x~1y"));
+        assert_eq!(props["b"]["$ref"], json!("#/$defs/t__m~0n/properties/z"));
+        assert!(schema["$defs"]["t__x/y"].is_object());
+        assert!(schema["$defs"]["t__m~n"].is_object());
+    }
+
+    #[test]
+    fn unsupported_refs_error() {
+        let cases = [
+            ("#", json!({"properties": {"x": {"$ref": "#"}}})),
+            (
+                "#/properties/x",
+                json!({"properties": {"y": {"$ref": "#/properties/x"}}}),
+            ),
+            (
+                "#/$defs/Missing",
+                json!({"properties": {"y": {"$ref": "#/$defs/Missing"}}, "$defs": {"Other": {}}}),
+            ),
+            (
+                "#/$defs/Missing",
+                json!({"properties": {"y": {"$ref": "#/$defs/Missing"}}}),
+            ),
+            // A ref inside a hoisted def is checked too.
+            (
+                "#/$defs/Nope",
+                json!({"$defs": {"P": {"items": {"$ref": "#/$defs/Nope"}}}}),
+            ),
+        ];
+        for (r, schema) in cases {
+            let msg = err_of(&[("t", None, &schema)]);
+            assert_eq!(
+                msg.trim_start_matches("MCP error: "),
+                format!(
+                    "tool \"t\": unsupported $ref \"{r}\" (only refs into the tool's own $defs/definitions are supported)"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_refs_and_data_positions_are_untouched() {
+        let s = json!({
+            "properties": {
+                "u": {"$ref": "https://example.com/schema.json"},
+                "d": {"default": {"$ref": "#/nowhere"}, "const": {"$ref": "#"},
+                      "enum": [{"$ref": "#/x"}], "examples": [{"$ref": "#/y"}]},
+                "default": {"$ref": "#/$defs/P"},
+            },
+            "$defs": {"P": {}},
+        });
+        let schema = build_orchestrator_schema(&[("t", None, &s)]).unwrap();
+        let props = &schema["properties"]["tool_parameters"]["anyOf"][0]["properties"];
+        assert_eq!(props["u"]["$ref"], json!("https://example.com/schema.json"));
+        assert_eq!(props["d"]["default"], json!({"$ref": "#/nowhere"}));
+        assert_eq!(props["d"]["const"], json!({"$ref": "#"}));
+        assert_eq!(props["d"]["enum"], json!([{"$ref": "#/x"}]));
+        assert_eq!(props["d"]["examples"], json!([{"$ref": "#/y"}]));
+        // A property that happens to be named `default` is still a schema.
+        assert_eq!(props["default"]["$ref"], json!("#/$defs/t__P"));
+    }
+
+    #[test]
+    fn non_object_type_errors_but_true_schema_is_empty() {
+        let s = json!({"type": "string"});
+        assert!(err_of(&[("t", None, &s)]).contains("object"));
+        let t = Value::Bool(true);
+        build_orchestrator_schema(&[("t", None, &t)]).unwrap();
+    }
+
+    #[test]
+    fn forwarded_arguments_exclude_tool_name() {
+        let mut arguments = Map::new();
+        arguments.insert("a".into(), json!(1));
+        arguments.insert("tool_name".into(), json!("add"));
+        let call = McpToolCall {
+            tool_name: "add".into(),
+            arguments,
+        };
+        assert_eq!(Value::Object(forwarded_arguments(&call)), json!({"a": 1}));
+        let parsed: McpToolCall =
+            serde_json::from_value(json!({"tool_name": "add", "a": 1})).unwrap();
+        assert_eq!(Value::Object(forwarded_arguments(&parsed)), json!({"a": 1}));
     }
 
     #[test]

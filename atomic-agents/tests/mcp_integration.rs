@@ -924,7 +924,17 @@ async fn orchestrator_unknown_tool_dispatch_errors() {
             tool_name: name.to_string(),
             arguments: Map::new(),
         };
-        assert_err_contains(toolset.dispatch(&call).await, "unknown MCP tool");
+        let available = toolset
+            .tools()
+            .iter()
+            .map(|t| t.mcp_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(available.contains("add") && !available.contains("stats"));
+        assert_err_contains(
+            toolset.dispatch(&call).await,
+            &format!("unknown MCP tool {name:?}; available: {available}"),
+        );
     }
     client.close().await.expect("close");
     http.shutdown().await;
