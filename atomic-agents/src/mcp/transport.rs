@@ -243,10 +243,11 @@ impl UrlScrubber {
             };
             push(info, String::new());
         }
-        if let Some(q) = parsed.query() {
+        // An empty `?`/`#` would make every `?`/`#` in the text a match.
+        if let Some(q) = parsed.query().filter(|q| !q.is_empty()) {
             push(format!("?{q}"), "?<redacted>".to_string());
         }
-        if let Some(f) = parsed.fragment() {
+        if let Some(f) = parsed.fragment().filter(|f| !f.is_empty()) {
             push(format!("#{f}"), "#<redacted>".to_string());
         }
         rules.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
@@ -437,6 +438,12 @@ mod tests {
     fn resolve_rejects_invalid_url() {
         let err = resolve_endpoint("not a url", "/mcp").unwrap_err();
         assert!(err.to_string().contains("Invalid endpoint URL"), "{err}");
+    }
+
+    #[test]
+    fn scrubber_ignores_empty_query_and_fragment() {
+        let s = UrlScrubber::new("http://h:1/mcp?#");
+        assert_eq!(s.scrub("why? see #3"), "why? see #3");
     }
 
     #[test]

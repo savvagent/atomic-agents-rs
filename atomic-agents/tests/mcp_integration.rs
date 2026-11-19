@@ -73,7 +73,8 @@ fn main() {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--list" => list = true,
-            "--ignored" | "--include-ignored" => ignored = true,
+            // `--include-ignored` lists/runs everything, like libtest.
+            "--ignored" => ignored = true,
             "--skip" => skips.extend(it.next().cloned()),
             "--test-threads" | "--format" | "--color" => {
                 it.next();
