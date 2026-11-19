@@ -28,11 +28,14 @@
 //! println!("{}", response.chat_message);
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 pub mod agent;
 pub mod chat_history;
 pub mod client;
 pub mod error;
 #[cfg(feature = "mcp")]
+#[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;
 pub mod prompt;
 pub mod resource;
@@ -64,12 +67,15 @@ pub mod prelude {
     pub use crate::tool::{ComponentConfig, Tool};
 
     #[cfg(feature = "openai")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
     pub use crate::client::openai::OpenAiClient;
 
     #[cfg(feature = "anthropic")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "anthropic")))]
     pub use crate::client::anthropic::AnthropicClient;
 
     #[cfg(feature = "google")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "google")))]
     pub use crate::client::google::GoogleClient;
 
     pub use atomic_agents_macros::IOSchema;

@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased — next minor (0.3.0)
+## 0.2.1 — Unreleased
+
+### Fixed
+
+- This changelog labelled the changes released in 0.2.0 as "Unreleased — next minor (0.3.0)", and left out the core changes from the upstream sync. Both are corrected below.
+- docs.rs now builds `atomic-agents` with all features, so the `mcp`, `anthropic` and `google` APIs are documented there, and each feature-gated item shows the feature it needs.
+
+## 0.2.0 — 2026-11-19
+
+0.2.0 combines a sync with upstream atomic-agents v2.16.2 (#2) and a rebuild of the `mcp` feature on `rmcp` (#3, #4). The previous release was 0.1.1.
 
 ### Breaking (mcp feature)
 
@@ -16,10 +25,20 @@
 
 ### Breaking (core)
 
+- `AgentConfig::mode` is now `Option<ExtractionMode>`. When it is `None`, the agent uses the client's `LlmClient::default_extraction_mode()` (default `Tools`); `AtomicAgent::mode()` returns the resolved mode.
+- `AgentConfig::history` is now `Option<Box<dyn BaseChatHistory>>` and `AgentConfig::system_prompt_generator` is `Option<Box<dyn BaseSystemPromptGenerator>>`. `with_history` and `with_system_prompt` take any implementation, and `AtomicAgent::history()` returns `Box<dyn BaseChatHistory>`.
+- `AgentConfig` gains a public `max_context_tokens: Option<usize>` field.
+- `ContentPart` gains a `VideoUrl` variant. It is not `#[non_exhaustive]`, so exhaustive matches must handle it.
+- A failed run (client error, extraction failure, over-budget context, or a failed or dropped stream) now removes the user turn it added to the history, and a streamed run records its final output in the history.
 - `AgentConfig` gains a public `output_schema: Option<serde_json::Value>` field. It is not `#[non_exhaustive]`, so struct-literal construction must add the field (or use `AgentConfig::new`).
 
 ### Added
 
+- Context token budget: `AgentConfig::with_max_context_tokens` trims the oldest turns before a run, always keeps the current turn, and errors if even the current turn does not fit. A zero budget is rejected.
+- `AtomicAgent::get_context_token_count`, which fires the `HookEvent::TokenCounted` hook. `TokenCounter::count_context` counts request framing once, so system prompt + history + tools add up to the total.
+- `BaseChatHistory` (implemented by `ChatHistory`) and `BaseSystemPromptGenerator` (implemented by `SystemPromptGenerator`) traits, `ChatHistory::turn_ids`, and `VideoUrlContent`.
+- `ChatHistory::load` enforces the restored `max_messages` capacity, and a failed load leaves the existing history untouched. `delete_turn` resets the current turn id.
+- `atomic-forge` (not published to crates.io) gains arXiv, Hacker News, Wikipedia, weather, datetime, PDF reader and Firecrawl search tools, an SSRF guard for network and file access, and upstream scraper, BoCha and SearXNG fixes.
 - `McpClient`: a persistent, initialised MCP session over stdio, Streamable HTTP or legacy HTTP+SSE, built on `rmcp`. Discovery is capability-gated and paginated, with repeated-cursor detection.
 - `McpTransport` (`stdio`, `streamable_http`, `sse`, `with_cwd`, `with_env`, `with_inherited_env`, `with_header`, `with_request_timeout`, `with_connect_timeout`, `from_endpoint`); `Authorization: Bearer` headers are supported.
 - Timeouts on every MCP transport: `McpTransport::with_request_timeout` (default `DEFAULT_REQUEST_TIMEOUT`, 60 s) bounds each request — every page of a list, `tools/call`, `resources/read`, `prompts/get` — and `McpTransport::with_connect_timeout` (default `DEFAULT_CONNECT_TIMEOUT`, 30 s) bounds spawning or opening the transport plus the `initialize` handshake. The legacy SSE transport's 30 s connect budget is now this connect timeout. A timed-out request is abandoned (rmcp sends `notifications/cancelled`) and the session stays usable.
