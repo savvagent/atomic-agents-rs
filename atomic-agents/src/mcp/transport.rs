@@ -311,26 +311,53 @@ fn client_config() -> ClientConfig {
     .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
 }
 
+/// Parses `headers` into validated pairs, in order, with values marked
+/// sensitive so they are redacted from `Debug` output. Shared by both HTTP
+/// transports.
+fn parse_header_pairs(
+    headers: &[(String, String)],
+) -> Result<Vec<(http::HeaderName, http::HeaderValue)>> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let name = http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| Error::Mcp(format!("invalid header name {name:?}: {e}")))?;
+            let mut value = http::HeaderValue::from_str(value)
+                .map_err(|e| Error::Mcp(format!("invalid value for header {name}: {e}")))?;
+            value.set_sensitive(true);
+            Ok((name, value))
+        })
+        .collect()
+}
+
+/// Builds a header map for the legacy SSE transport. Repeated names are all
+/// kept (`append`), and `Authorization` is sent as given.
+fn sse_header_map(headers: &[(String, String)]) -> Result<http::HeaderMap> {
+    let mut map = http::HeaderMap::new();
+    for (name, value) in parse_header_pairs(headers)? {
+        map.append(name, value);
+    }
+    Ok(map)
+}
+
 /// Splits headers into a bearer token (if any) and the remaining header map.
+/// rmcp's config takes a name-keyed map, so for the streamable HTTP transport
+/// a repeated name keeps only its last value.
 fn http_headers(
     headers: &[(String, String)],
 ) -> Result<(Option<String>, HashMap<http::HeaderName, http::HeaderValue>)> {
     let mut bearer = None;
-    let mut map = HashMap::new();
+    let mut rest = Vec::new();
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("authorization")
             && let Some(token) = value.strip_prefix("Bearer ")
         {
             bearer = Some(token.to_string());
-            continue;
+        } else {
+            rest.push((name.clone(), value.clone()));
         }
-        let name = http::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|e| Error::Mcp(format!("invalid header name {name:?}: {e}")))?;
-        let value = http::HeaderValue::from_str(value)
-            .map_err(|e| Error::Mcp(format!("invalid value for header {name}: {e}")))?;
-        map.insert(name, value);
     }
-    Ok((bearer, map))
+    Ok((bearer, parse_header_pairs(&rest)?.into_iter().collect()))
 }
 
 /// Opens `transport` and completes the MCP initialize handshake.
@@ -371,17 +398,12 @@ pub(crate) async fn connect_transport(
             client_config().serve(http).await.map_err(|e| fail(&e))?
         }
         McpTransport::Sse { url, headers } => {
-            let mut map = reqwest::header::HeaderMap::new();
-            for (name, value) in headers {
-                let n = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|e| fail(&format!("invalid header name {name:?}: {e}")))?;
-                let mut v = reqwest::header::HeaderValue::from_str(value)
-                    .map_err(|e| fail(&format!("invalid value for header {n}: {e}")))?;
-                v.set_sensitive(true);
-                map.append(n, v);
-            }
+            let map = sse_header_map(headers).map_err(|e| fail(&e))?;
             // Never follow redirects: they could replay credentials elsewhere.
+            // A bounded connect phase only: no total timeout, since the SSE
+            // stream is long-lived.
             let http = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| fail(&e.without_url()))?;
@@ -576,6 +598,19 @@ mod tests {
                 headers: vec![("X".into(), "y".into())],
             }
         );
+    }
+
+    #[test]
+    fn sse_headers_append_and_reject_invalid() {
+        let map = sse_header_map(&[
+            ("Authorization".into(), "Bearer tok".into()),
+            ("x-multi".into(), "a".into()),
+            ("x-multi".into(), "b".into()),
+        ])
+        .unwrap();
+        assert_eq!(map.get_all("x-multi").iter().count(), 2);
+        assert_eq!(map["authorization"], "Bearer tok");
+        assert!(sse_header_map(&[("x".into(), "a\r\nb".into())]).is_err());
     }
 
     #[test]

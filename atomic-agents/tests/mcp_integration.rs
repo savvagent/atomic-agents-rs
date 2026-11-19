@@ -90,6 +90,9 @@ fn scenarios() -> Vec<Scenario> {
             sse_cross_origin_endpoint_rejected().boxed()
         }),
         ("sse_header_forwarded", || sse_header_forwarded().boxed()),
+        ("sse_cancelled_connect_closes_stream", || {
+            sse_cancelled_connect_closes_stream().boxed()
+        }),
     ]
 }
 
@@ -811,5 +814,33 @@ async fn sse_header_forwarded() {
 
     let bare = McpClient::connect(McpTransport::sse(format!("{}/sse", legacy.base))).await;
     assert!(bare.is_err(), "connect without the header must fail");
+    legacy.shutdown().await;
+}
+
+/// Dropping a `connect` that is still waiting for the `endpoint` event must
+/// close the SSE connection instead of leaking the reader task.
+async fn sse_cancelled_connect_closes_stream() {
+    use std::sync::atomic::Ordering;
+
+    let legacy = spawn_legacy_sse(
+        TestServer::default(),
+        LegacyOptions {
+            never_send_endpoint: true,
+            ..LegacyOptions::default()
+        },
+    )
+    .await;
+    let connect = McpClient::connect(McpTransport::sse(format!("{}/sse", legacy.base)));
+    let outcome = tokio::time::timeout(Duration::from_millis(300), connect).await;
+    assert!(outcome.is_err(), "connect must still be waiting");
+    assert_eq!(legacy.observed.streams_opened.load(Ordering::SeqCst), 1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while legacy.observed.live_streams.load(Ordering::SeqCst) != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SSE connection still open after connect was cancelled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     legacy.shutdown().await;
 }

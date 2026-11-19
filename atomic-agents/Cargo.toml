@@ -49,7 +49,7 @@ default = ["openai"]
 openai = []
 anthropic = []
 google = []
-mcp = ["dep:rmcp", "dep:shlex", "dep:url", "dep:http"]
+mcp = ["dep:rmcp", "dep:shlex", "dep:url", "dep:http", "tokio/time"]
 
 [[test]]
 name = "mcp_integration"

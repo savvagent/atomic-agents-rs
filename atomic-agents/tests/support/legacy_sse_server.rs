@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -35,6 +36,28 @@ pub struct LegacyObserved {
     pub post_had_header: AtomicBool,
     /// Number of `POST /messages` requests received.
     pub posts: AtomicUsize,
+    /// `GET /sse` streams opened so far.
+    pub streams_opened: AtomicUsize,
+    /// `GET /sse` streams currently open (decremented when the stream is dropped,
+    /// i.e. when the client disconnects).
+    pub live_streams: AtomicUsize,
+}
+
+/// Counts one live SSE stream for as long as it is held.
+struct LiveStream(Arc<LegacyObserved>);
+
+impl LiveStream {
+    fn new(observed: &Arc<LegacyObserved>) -> Self {
+        observed.streams_opened.fetch_add(1, Ordering::SeqCst);
+        observed.live_streams.fetch_add(1, Ordering::SeqCst);
+        Self(observed.clone())
+    }
+}
+
+impl Drop for LiveStream {
+    fn drop(&mut self) {
+        self.0.live_streams.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -45,6 +68,7 @@ struct AppState {
     endpoint_override: Option<String>,
     /// Header (`name`, `value`) every request must carry, when set.
     required_header: Option<(String, String)>,
+    never_send_endpoint: bool,
     observed: Arc<LegacyObserved>,
 }
 
@@ -82,22 +106,39 @@ pub struct LegacyOptions {
     pub endpoint_override: Option<String>,
     /// Require this header on every request (401 otherwise).
     pub required_header: Option<(String, String)>,
+    /// Open the SSE stream but never send the `endpoint` event.
+    pub never_send_endpoint: bool,
 }
+
+type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
 async fn sse(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+) -> Result<Sse<SseStream>, StatusCode> {
     if state.has_required_header(&headers) {
         state.observed.get_had_header.store(true, Ordering::SeqCst);
     } else {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    let live = LiveStream::new(&state.observed);
+    if state.never_send_endpoint {
+        let stream = futures::stream::unfold(live, |live| async move {
+            std::future::pending::<()>().await;
+            Some((Ok(Event::default()), live))
+        });
+        return Ok(Sse::new(Box::pin(stream)));
+    }
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     let server = state.server.clone();
     tokio::spawn(async move {
-        if let Ok(running) = server.serve(server_side).await {
-            let _ = running.waiting().await;
+        match server.serve(server_side).await {
+            Ok(running) => {
+                let _ = running.waiting().await;
+            }
+            // The client left before initializing (e.g. it rejected the endpoint).
+            Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => {}
+            Err(e) => panic!("test MCP server failed to serve a legacy SSE session: {e}"),
         }
     });
     let (read, write) = tokio::io::split(client_side);
@@ -114,15 +155,18 @@ async fn sse(
     let first = futures::stream::once(async move {
         Ok::<_, Infallible>(Event::default().event("endpoint").data(endpoint))
     });
-    let rest = futures::stream::unfold(BufReader::new(read).lines(), |mut lines| async move {
-        lines
-            .next_line()
-            .await
-            .ok()
-            .flatten()
-            .map(|line| (Ok(Event::default().event("message").data(line)), lines))
-    });
-    Ok(Sse::new(first.chain(rest)))
+    let rest = futures::stream::unfold(
+        (BufReader::new(read).lines(), live),
+        |(mut lines, live)| async move {
+            lines.next_line().await.ok().flatten().map(|line| {
+                (
+                    Ok(Event::default().event("message").data(line)),
+                    (lines, live),
+                )
+            })
+        },
+    );
+    Ok(Sse::new(Box::pin(first.chain(rest))))
 }
 
 async fn messages(
@@ -159,6 +203,7 @@ pub async fn spawn_legacy_sse(server: TestServer, options: LegacyOptions) -> Leg
         writers: Writers::default(),
         endpoint_override: options.endpoint_override,
         required_header: options.required_header,
+        never_send_endpoint: options.never_send_endpoint,
         observed: observed.clone(),
     };
     let router = axum::Router::new()
