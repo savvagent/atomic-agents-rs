@@ -13,7 +13,10 @@ use crate::error::{Error, Result};
 use crate::schema::IOSchema;
 use crate::tool::{ComponentConfig, Tool};
 
-/// Arguments for an MCP tool call, as a JSON object.
+/// Arguments for an MCP tool call, resource template or prompt, as a JSON
+/// object. It is the input of [`McpTool`], [`McpResource`](super::McpResource)
+/// (template variables) and [`McpPrompt`](super::McpPrompt) (prompt
+/// arguments).
 ///
 /// Serializes transparently as the object itself.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -31,7 +34,7 @@ impl IOSchema for McpToolInput {
         "McpToolInput"
     }
     fn schema_description() -> &'static str {
-        "Arguments for an MCP tool call."
+        "Arguments for an MCP tool call, resource template or prompt."
     }
 }
 
@@ -160,7 +163,7 @@ mod tests {
         assert_eq!(McpToolOutput::schema_title(), "McpToolOutput");
         assert_eq!(
             McpToolInput::schema_description(),
-            "Arguments for an MCP tool call."
+            "Arguments for an MCP tool call, resource template or prompt."
         );
         assert_eq!(
             McpToolOutput::schema_description(),
