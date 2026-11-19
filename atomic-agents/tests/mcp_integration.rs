@@ -18,9 +18,10 @@ use std::time::Duration;
 
 use atomic_agents::error::Error;
 use atomic_agents::mcp::{
-    McpClient, McpResource, McpResourceContent, McpResourceOutput, McpTool, McpToolInput,
-    McpToolOutput, McpTransport, McpTransportType,
+    McpClient, McpPrompt, McpPromptOutput, McpResource, McpResourceContent, McpResourceOutput,
+    McpTool, McpToolInput, McpToolOutput, McpTransport, McpTransportType,
 };
+use atomic_agents::prompt::Prompt;
 use atomic_agents::resource::Resource;
 use atomic_agents::tool::Tool;
 use futures::FutureExt;
@@ -69,6 +70,11 @@ fn scenarios() -> Vec<Scenario> {
         }),
         ("resource_read_error_redacts_query", || {
             resource_read_error_redacts_query().boxed()
+        }),
+        ("prompts_over_http", || prompts_over_http().boxed()),
+        ("prompts_over_stdio", || prompts_over_stdio().boxed()),
+        ("prompt_generate_on_current_thread_runtime_errors", || {
+            prompt_generate_on_current_thread_runtime_errors().boxed()
         }),
         ("resource_read_on_current_thread_runtime_errors", || {
             resource_read_on_current_thread_runtime_errors().boxed()
@@ -597,4 +603,90 @@ async fn resource_read_error_redacts_query() {
     assert!(!text.contains("secret123"), "secret leaked: {text}");
     client.close().await.expect("close");
     http.shutdown().await;
+}
+
+type BoxedPrompt = Box<dyn Prompt<Input = McpToolInput, Output = McpPromptOutput>>;
+
+fn find_prompt(prompts: &[McpPrompt], name: &str) -> McpPrompt {
+    prompts
+        .iter()
+        .find(|p| p.definition().name == name)
+        .unwrap_or_else(|| panic!("prompt {name} not discovered"))
+        .clone()
+}
+
+/// Discovery, blocking and async generation, and a missing required argument.
+/// `Prompt::generate` blocks, so this must run on a multi-thread runtime.
+async fn assert_prompts(client: &McpClient) {
+    let prompts = client.prompts().await.expect("prompts");
+    let greet = find_prompt(&prompts, "greet");
+    let args_def = &greet.definition().arguments;
+    assert_eq!(args_def.len(), 1);
+    assert_eq!(args_def[0].name, "name");
+    assert!(args_def[0].required);
+
+    let boxed: BoxedPrompt = Box::new(greet.clone());
+    assert_eq!(boxed.name(), "greet");
+    let out = boxed
+        .generate(McpToolInput(args(json!({"name": "Ada"}))))
+        .expect("generate");
+    assert_eq!(out.content, "Hello, Ada!");
+    assert_eq!(out.description.as_deref(), Some("Greets someone"));
+    assert_eq!(out.messages[0].role, "user");
+    assert_eq!(
+        out.messages[0].content,
+        json!({"type": "text", "text": "Hello, Ada!"})
+    );
+
+    let via_client = client
+        .get_prompt("greet", args(json!({"name": "Ada"})))
+        .await
+        .expect("get_prompt");
+    assert_eq!(via_client, out);
+    let via_async = greet.get(args(json!({"name": "Ada"}))).await.expect("get");
+    assert_eq!(via_async, out);
+
+    assert!(boxed.generate(McpToolInput::default()).is_err());
+    assert!(client.get_prompt("nope", Map::new()).await.is_err());
+}
+
+async fn prompts_over_http() {
+    let http = spawn_http(TestServer::default()).await;
+    let client = McpClient::connect(McpTransport::streamable_http(format!("{}/mcp", http.base)))
+        .await
+        .expect("connect http");
+    assert_prompts(&client).await;
+    client.close().await.expect("close");
+    http.shutdown().await;
+}
+
+async fn prompts_over_stdio() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    assert_prompts(&client).await;
+    client.close().await.expect("close");
+}
+
+/// `Prompt::generate` must return an error, not panic, on a current-thread
+/// runtime and outside any runtime.
+async fn prompt_generate_on_current_thread_runtime_errors() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    let greet = find_prompt(&client.prompts().await.expect("prompts"), "greet");
+    std::thread::spawn(move || {
+        let boxed: BoxedPrompt = Box::new(greet);
+        assert_err_contains(boxed.generate(McpToolInput::default()), "multi-threaded");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            assert_err_contains(boxed.generate(McpToolInput::default()), "McpPrompt::get");
+        });
+    })
+    .join()
+    .expect("generate must not panic");
+    client.close().await.expect("close");
 }

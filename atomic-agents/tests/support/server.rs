@@ -288,19 +288,23 @@ impl ServerHandler for TestServer {
         _cx: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<GetPromptResponse, McpError>> + MaybeSendFuture + '_ {
         let result = if request.name == "greet" {
-            let name = request
+            match request
                 .arguments
                 .as_ref()
                 .and_then(|a| a.get("name"))
                 .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string();
-            Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-                Role::User,
-                format!("Hello, {name}!"),
-            )])
-            .with_description("Greets someone")
-            .into())
+            {
+                Some(name) => Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                    Role::User,
+                    format!("Hello, {name}!"),
+                )])
+                .with_description("Greets someone")
+                .into()),
+                None => Err(McpError::invalid_params(
+                    "missing required argument 'name'",
+                    None,
+                )),
+            }
         } else {
             Err(McpError::invalid_params(
                 format!("unknown prompt {}", request.name),

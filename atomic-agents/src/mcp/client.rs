@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::RoleClient;
 use rmcp::model::{
-    CallToolRequestParams, ClientConfig, ErrorCode, PaginatedRequestParams,
+    CallToolRequestParams, ClientConfig, ErrorCode, GetPromptRequestParams, PaginatedRequestParams,
     ReadResourceRequestParams, ServerCapabilities, ServerPeerInfo,
 };
 use rmcp::service::{Peer, RunningService, ServiceError};
 use serde_json::{Map, Value};
 
 use super::definitions::{McpPromptDefinition, McpResourceDefinition, McpToolDefinition};
+use super::prompt::{McpPrompt, McpPromptOutput};
 use super::resource::{McpResource, McpResourceOutput};
 use super::result::extract_tool_result;
 use super::tool::McpTool;
@@ -207,6 +208,36 @@ impl McpClient {
         })
         .await?;
         Ok(prompts.into_iter().map(McpPromptDefinition::from).collect())
+    }
+
+    /// Lists every prompt as an [`McpPrompt`] bound to this session.
+    pub async fn prompts(&self) -> Result<Vec<McpPrompt>> {
+        Ok(self
+            .list_prompts()
+            .await?
+            .into_iter()
+            .map(|def| McpPrompt::from_definition(def, self.clone()))
+            .collect())
+    }
+
+    /// Renders prompt `name` with `args` (`prompts/get`).
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+    ) -> Result<McpPromptOutput> {
+        let peer = self.peer()?;
+        let result = peer
+            .get_prompt(GetPromptRequestParams::new(name).with_arguments(args))
+            .await
+            .map_err(|e| {
+                Error::Mcp(
+                    self.inner
+                        .scrubber
+                        .scrub(&format!("prompts/get '{name}' failed: {e}")),
+                )
+            })?;
+        McpPromptOutput::from_result(result)
     }
 
     /// Calls tool `name` with `args` and converts the result to JSON.

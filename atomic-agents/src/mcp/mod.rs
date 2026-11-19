@@ -27,6 +27,7 @@
 
 mod client;
 mod definitions;
+mod prompt;
 mod resource;
 mod result;
 mod tool;
@@ -36,6 +37,7 @@ pub use client::{McpClient, McpPaginationError};
 pub use definitions::{
     McpPromptArgument, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
 };
+pub use prompt::{McpPrompt, McpPromptMessage, McpPromptOutput};
 pub use resource::{McpResource, McpResourceContent, McpResourceOutput};
 pub use rmcp::model::ServerCapabilities;
 pub use tool::{McpTool, McpToolInput, McpToolOutput};
