@@ -27,6 +27,7 @@
 //! ```
 
 mod client;
+mod definition_service;
 mod definitions;
 mod legacy_sse;
 mod orchestrator;
@@ -37,6 +38,7 @@ mod tool;
 mod transport;
 
 pub use client::{McpClient, McpPaginationError};
+pub use definition_service::{McpDefinitionService, create_mcp_tools};
 pub use definitions::{
     McpPromptArgument, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
 };

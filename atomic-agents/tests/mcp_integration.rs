@@ -19,9 +19,9 @@ use std::time::Duration;
 use atomic_agents::agent::{AgentConfig, AtomicAgent};
 use atomic_agents::error::Error;
 use atomic_agents::mcp::{
-    McpClient, McpOrchestratorOutput, McpPrompt, McpPromptOutput, McpResource, McpResourceContent,
-    McpResourceOutput, McpTool, McpToolCall, McpToolInput, McpToolOutput, McpToolset, McpTransport,
-    McpTransportType, fetch_mcp_attributes_with_schema,
+    McpClient, McpDefinitionService, McpOrchestratorOutput, McpPrompt, McpPromptOutput,
+    McpResource, McpResourceContent, McpResourceOutput, McpTool, McpToolCall, McpToolInput,
+    McpToolOutput, McpToolset, McpTransport, McpTransportType, fetch_mcp_attributes_with_schema,
 };
 use atomic_agents::prompt::Prompt;
 use atomic_agents::resource::Resource;
@@ -86,6 +86,9 @@ fn scenarios() -> Vec<Scenario> {
         }),
         ("prompt_get_error_redacts_query", || {
             prompt_get_error_redacts_query().boxed()
+        }),
+        ("definition_service_one_shot", || {
+            definition_service_one_shot().boxed()
         }),
         ("orchestrator_selects_mcp_tool", || {
             orchestrator_selects_mcp_tool().boxed()
@@ -938,4 +941,37 @@ async fn orchestrator_unknown_tool_dispatch_errors() {
     }
     client.close().await.expect("close");
     http.shutdown().await;
+}
+
+/// The compat service opens a real session per call and closes it again.
+async fn definition_service_one_shot() {
+    // `from_endpoint` shlex-splits the endpoint, so the binary path is quoted.
+    let exe = std::env::current_exe().expect("current exe");
+    let quoted = shlex::try_quote(&exe.to_string_lossy())
+        .expect("path has no NUL")
+        .into_owned();
+    let service =
+        McpDefinitionService::new(format!("{quoted} {STDIO_FLAG}"), McpTransportType::Stdio);
+
+    let tools = service.fetch_tool_definitions().await.expect("tools");
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    let expected = all_tools();
+    let expected_names: Vec<&str> = expected.iter().map(|t| t.name.as_ref()).collect();
+    assert_eq!(names, expected_names);
+    assert_eq!(tools.len(), 5);
+
+    let resources = service
+        .fetch_resource_definitions()
+        .await
+        .expect("resources");
+    let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
+    assert_eq!(uris, ["mem://hello", "mem://blob", "mem://notes/{id}"]);
+    let prompts = service.fetch_prompt_definitions().await.expect("prompts");
+    assert!(prompts.iter().any(|p| p.name == "greet"));
+
+    let service = service.with_working_directory(std::env::temp_dir());
+    assert_eq!(
+        service.fetch_tool_definitions().await.expect("tools").len(),
+        5
+    );
 }
