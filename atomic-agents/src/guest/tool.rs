@@ -140,16 +140,32 @@ impl IOSchema for HostToolOutput {
 pub struct HostTool<H: McpHost> {
     host: H,
     info: ToolInfo,
+    schema: Value,
     config: ComponentConfig,
 }
 
 impl<H: McpHost> HostTool<H> {
     /// Binds `info` to the host it was listed from.
-    pub fn new(host: H, info: ToolInfo) -> Self {
+    ///
+    /// Errors with [`Error::Mcp`] when `info.input_schema` is not valid JSON,
+    /// so [`HostTool::input_schema`] and the [`ToolSpec`] sent to the model
+    /// always agree.
+    pub fn new(host: H, info: ToolInfo) -> AgentResult<Self> {
+        let schema = serde_json::from_str(&info.input_schema).map_err(|e| {
+            Error::Mcp(format!(
+                "host tool {:?} has an invalid input schema: {e}",
+                info.name
+            ))
+        })?;
         let config = ComponentConfig::new()
             .with_title(info.name.clone())
             .with_description(info.description.clone());
-        Self { host, info, config }
+        Ok(Self {
+            host,
+            info,
+            schema,
+            config,
+        })
     }
 
     /// The tool name used in [`McpHost::call`].
@@ -157,11 +173,9 @@ impl<H: McpHost> HostTool<H> {
         &self.info.name
     }
 
-    /// JSON Schema of the arguments. A schema the host sent that is not valid
-    /// JSON is reported as the permissive `{"type": "object"}`.
+    /// JSON Schema of the arguments, as the host sent it.
     pub fn input_schema(&self) -> Value {
-        serde_json::from_str(&self.info.input_schema)
-            .unwrap_or_else(|_| serde_json::json!({"type": "object"}))
+        self.schema.clone()
     }
 
     /// Calls the tool. The output is parsed as JSON; when it is not JSON it
@@ -225,7 +239,7 @@ impl<H: McpHost + Clone> HostToolset<H> {
             .list_tools()?
             .into_iter()
             .map(|info| HostTool::new(host.clone(), info))
-            .collect();
+            .collect::<AgentResult<Vec<_>>>()?;
         Ok(Self::new(tools))
     }
 
@@ -284,6 +298,7 @@ mod tests {
     struct MockMcp {
         calls: Mutex<Vec<(String, String)>>,
         list_error: Option<ToolError>,
+        bad_schema: bool,
     }
 
     impl McpHost for MockMcp {
@@ -309,7 +324,11 @@ mod tests {
                 .map(|n| ToolInfo {
                     name: n.to_string(),
                     description: format!("the {n} tool"),
-                    input_schema: r#"{"type":"object"}"#.to_string(),
+                    input_schema: if self.bad_schema && *n == "plain" {
+                        "{not json".to_string()
+                    } else {
+                        r#"{"type":"object"}"#.to_string()
+                    },
                 })
                 .collect())
         }
@@ -368,6 +387,18 @@ mod tests {
         };
         match HostToolset::from_host(Arc::new(failing)) {
             Err(Error::Mcp(m)) => assert_eq!(m, "host mcp: failed: down"),
+            other => panic!("unexpected {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn invalid_input_schema_is_rejected_when_listing() {
+        let host = Arc::new(MockMcp {
+            bad_schema: true,
+            ..Default::default()
+        });
+        match HostToolset::from_host(host) {
+            Err(Error::Mcp(m)) => assert!(m.contains("plain"), "{m}"),
             other => panic!("unexpected {:?}", other.map(|_| ())),
         }
     }

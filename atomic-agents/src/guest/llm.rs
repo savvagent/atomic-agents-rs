@@ -214,7 +214,7 @@ impl<H: LlmHost> HostLlmClient<H> {
         Self { host }
     }
 
-    fn to_completion_request(request: ChatRequest) -> CompletionRequest {
+    fn to_completion_request(request: ChatRequest) -> Result<CompletionRequest, Error> {
         let mut system: Vec<String> = Vec::new();
         let mut messages = Vec::new();
         for m in request.messages {
@@ -224,6 +224,8 @@ impl<H: LlmHost> HostLlmClient<H> {
             };
             match m.role.as_str() {
                 "system" => system.push(text),
+                // Roles other than system/assistant (tool, function, ...) carry
+                // text the model must read, so they go in as user turns.
                 role => messages.push(Message {
                     role: if role == "assistant" {
                         Role::Assistant
@@ -236,27 +238,42 @@ impl<H: LlmHost> HostLlmClient<H> {
         }
 
         // The framework sends exactly one tool: the extraction tool. Its
-        // parameters are the schema the reply must follow.
+        // parameters are the schema the reply must follow. Anything else
+        // cannot be expressed to the host, so it is an error, not a silent drop.
         let output_schema = match request.tools.as_deref() {
-            Some([extraction]) => serde_json::to_string(&extraction.function.parameters).ok(),
-            _ => None,
+            None | Some([]) => None,
+            Some([extraction]) => Some(serde_json::to_string(&extraction.function.parameters)?),
+            Some(many) => {
+                return Err(LlmError::InvalidRequest(format!(
+                    "{} tools given; only the single extraction tool is supported",
+                    many.len()
+                ))
+                .into());
+            }
         };
 
         let mut extra: Map<String, Value> = request.extra.into_iter().collect();
-        let max_tokens = match extra.get("max_tokens").and_then(Value::as_u64) {
-            Some(n) if u32::try_from(n).is_ok() => {
-                extra.remove("max_tokens");
-                u32::try_from(n).ok()
-            }
-            _ => None,
+        let max_tokens = match extra.remove("max_tokens") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        LlmError::InvalidRequest(format!(
+                            "max_tokens must be an integer from 0 to {}, got {value}",
+                            u32::MAX
+                        ))
+                    })?,
+            ),
         };
         let params = if extra.is_empty() {
             None
         } else {
-            serde_json::to_string(&extra).ok()
+            Some(serde_json::to_string(&extra)?)
         };
 
-        CompletionRequest {
+        Ok(CompletionRequest {
             model: request.model,
             system: if system.is_empty() {
                 None
@@ -268,11 +285,11 @@ impl<H: LlmHost> HostLlmClient<H> {
             output_schema,
             max_tokens,
             params,
-        }
+        })
     }
 
     fn complete(&self, request: ChatRequest) -> Result<ChatResponse, Error> {
-        let completion = self.host.complete(Self::to_completion_request(request))?;
+        let completion = self.host.complete(Self::to_completion_request(request)?)?;
         Ok(ChatResponse {
             content: completion.text.unwrap_or_default(),
             finish_reason: Some(completion.stop_reason),
@@ -478,6 +495,51 @@ mod tests {
         assert_eq!(params, json!({"temperature": 0.5}));
         assert_eq!(sent[1].max_tokens, Some(10));
         assert_eq!(sent[1].params, None);
+    }
+
+    fn invalid_request(result: Result<ChatResponse, Error>) -> String {
+        match result {
+            Err(Error::Client(ClientError::Api { status: 0, message })) => message,
+            other => panic!("expected host llm InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn more_than_one_tool_is_rejected_not_dropped() {
+        let host = MockLlm::scripted(vec![]);
+        let client = HostLlmClient::new(host.clone());
+        let mut request = ChatRequest::new("m", vec![msg("user", json!("hi"))]);
+        request.tools = Some(vec![extraction_tool(json!({})), extraction_tool(json!({}))]);
+        let message = invalid_request(block_on(client.chat_completion(request)));
+        assert!(
+            message.starts_with("host llm: invalid request"),
+            "{message}"
+        );
+        assert!(host.requests().is_empty(), "nothing reaches the host");
+    }
+
+    #[test]
+    fn empty_tools_means_no_output_schema() {
+        let host = MockLlm::scripted(vec![Ok(text("ok"))]);
+        let client = HostLlmClient::new(host.clone());
+        let mut request = ChatRequest::new("m", vec![msg("user", json!("hi"))]);
+        request.tools = Some(vec![]);
+        block_on(client.chat_completion(request)).unwrap();
+        assert_eq!(host.requests()[0].output_schema, None);
+    }
+
+    #[test]
+    fn max_tokens_that_is_not_a_u32_is_rejected() {
+        for bad in [json!(5_000_000_000u64), json!(-1), json!("10"), json!(1.5)] {
+            let host = MockLlm::scripted(vec![]);
+            let client = HostLlmClient::new(host.clone());
+            let mut request = ChatRequest::new("m", vec![msg("user", json!("hi"))]);
+            request.extra = HashMap::from([("max_tokens".to_string(), bad.clone())]);
+            let message = invalid_request(block_on(client.chat_completion(request)));
+            assert!(message.contains("max_tokens"), "{message}");
+            assert!(message.contains(&bad.to_string()), "{message}");
+            assert!(host.requests().is_empty());
+        }
     }
 
     #[test]
