@@ -195,6 +195,7 @@ Notes:
 - HTTPS uses native-tls (OpenSSL on Linux, the platform TLS stack elsewhere), the same backend as the crate's other HTTP clients; the `mcp` feature adds no rustls.
 - The legacy SSE transport only accepts a same-origin POST endpoint, never follows redirects, allows 30 s to connect and caps each event at 16 MiB.
 - The orchestrator schema is deterministic (sorted keys) and lists `tool_name` first in `required`; it does not rely on property order.
+- The orchestrator schema drops each tool's own `$schema` and hoists its `$defs` into the root. Gemini function declarations do not support `$ref`/`$defs`, so tools whose schemas use them may need flattening for Google models.
 
 ## Examples
 

@@ -10,6 +10,12 @@
 //!
 //! Each tool's schema pins `tool_name` to the tool via an `enum` and lists it
 //! first in `required`. Property order carries no meaning in JSON Schema.
+//!
+//! Each tool's own `$schema` keyword is dropped, and its `$defs` /
+//! `definitions` are hoisted into the root `$defs` with refs rewritten to
+//! match. Gemini function declarations do not support `$ref` or `$defs`, so
+//! with Google models a tool whose input schema uses them may need its
+//! schema flattened (refs inlined) first.
 
 use std::collections::HashMap;
 
@@ -74,6 +80,9 @@ impl IOSchema for McpOrchestratorOutput {
 /// `required` keeps `tool_name` first. The `serde_json/preserve_order` feature
 /// is deliberately not enabled, because feature unification would change map
 /// ordering for every crate in a downstream dependency graph.
+///
+/// Gemini does not support `$ref`/`$defs` in function declarations; see the
+/// module docs.
 ///
 /// Errors when `tools` is empty, two tools share a name,
 /// or a tool already declares a `tool_name` property.
@@ -247,6 +256,9 @@ pub(crate) fn build_orchestrator_schema(entries: &[(&str, Option<&str>, &Value)]
                 "tool {name:?}: input schema type must be \"object\", got {ty}"
             )));
         }
+        // A dialect declaration is only meaningful at a document root; inside
+        // the `anyOf` it is noise, and some providers reject it.
+        schema.remove("$schema");
         let mut defs = take_defs(name, &mut schema)?;
         let prefix = sanitize(name);
         let has_defs = !defs.is_empty();
@@ -472,6 +484,19 @@ mod tests {
         assert_eq!(any_of[0]["required"], json!(["tool_name", "a"]));
         assert_eq!(any_of[0]["description"], json!("Adds."));
         assert!(any_of[1].get("description").is_none());
+    }
+
+    #[test]
+    fn member_schema_keywords_are_stripped() {
+        let with_dialect = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {"a": {"type": "number"}}
+        });
+        let schema = build_orchestrator_schema(&[("add", None, &with_dialect)]).unwrap();
+        let member = &schema["properties"]["tool_parameters"]["anyOf"][0];
+        assert!(member.get("$schema").is_none(), "{member}");
+        assert_eq!(member["properties"]["a"], json!({"type": "number"}));
     }
 
     #[test]

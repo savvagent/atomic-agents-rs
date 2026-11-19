@@ -30,6 +30,7 @@
 - URL userinfo, query and fragment are redacted from MCP error text; header values are marked sensitive. The Streamable HTTP transport uses rmcp's default reqwest client (same-origin 307/308 redirects only, at most 10) wrapped so that HTTP client errors carry no URL, which also keeps endpoint secrets out of rmcp's own `tracing` output.
 - Legacy SSE hardening: same-origin POST endpoint, no redirects, 30 s connect budget, 16 MiB per-event cap.
 - The orchestrator schema does not require `serde_json/preserve_order`; `tool_name` is listed first in `required` only.
+- The orchestrator schema strips each tool's own `$schema` keyword from its `anyOf` member. Gemini function declarations do not support `$ref`/`$defs`; schemas that use them may need flattening for Google models.
 - TLS for the Streamable HTTP transport uses native-tls (rmcp's `reqwest-native-tls`), the same backend as this crate's reqwest 0.12 default. The `mcp` feature pulls in no rustls, aws-lc-rs or aws-lc-sys, so it cannot change which rustls crypto provider a downstream build selects.
 
 ### Known limitations
