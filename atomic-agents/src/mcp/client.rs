@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 
 use super::definitions::{McpPromptDefinition, McpResourceDefinition, McpToolDefinition};
 use super::result::extract_tool_result;
+use super::tool::McpTool;
 use super::transport::{McpTransport, McpTransportType, UrlScrubber, connect_transport};
 use crate::error::{Error, Result};
 
@@ -104,6 +105,16 @@ impl McpClient {
         })
         .await?;
         Ok(tools.into_iter().map(McpToolDefinition::from).collect())
+    }
+
+    /// Lists every tool as an [`McpTool`] bound to this session.
+    pub async fn tools(&self) -> Result<Vec<McpTool>> {
+        Ok(self
+            .list_tools()
+            .await?
+            .into_iter()
+            .map(|def| McpTool::from_definition(def, self.clone()))
+            .collect())
     }
 
     /// Lists every resource followed by every resource template. Empty when

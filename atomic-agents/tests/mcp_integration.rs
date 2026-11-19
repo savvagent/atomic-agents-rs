@@ -17,7 +17,10 @@ mod support;
 use std::time::Duration;
 
 use atomic_agents::error::Error;
-use atomic_agents::mcp::{McpClient, McpTransport, McpTransportType};
+use atomic_agents::mcp::{
+    McpClient, McpTool, McpToolInput, McpToolOutput, McpTransport, McpTransportType,
+};
+use atomic_agents::tool::Tool;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use rmcp::ServiceExt;
@@ -52,6 +55,11 @@ fn scenarios() -> Vec<Scenario> {
             http_connect_error_redacts_query().boxed()
         }),
         ("closed_session_errors", || closed_session_errors().boxed()),
+        ("tool_trait_over_http", || tool_trait_over_http().boxed()),
+        ("tool_trait_over_stdio", || tool_trait_over_stdio().boxed()),
+        ("tool_run_on_current_thread_runtime_errors", || {
+            tool_run_on_current_thread_runtime_errors().boxed()
+        }),
     ]
 }
 
@@ -338,4 +346,91 @@ async fn closed_session_errors() {
     assert_err_contains(client.list_tools().await, "closed");
     assert_err_contains(clone.call_tool("echo", Map::new()).await, "closed");
     http.shutdown().await;
+}
+
+type BoxedTool = Box<dyn Tool<Input = McpToolInput, Output = McpToolOutput>>;
+
+fn find_tool(tools: &[McpTool], name: &str) -> McpTool {
+    tools
+        .iter()
+        .find(|t| t.mcp_name() == name)
+        .unwrap_or_else(|| panic!("tool {name} not discovered"))
+        .clone()
+}
+
+/// Exercises `Tool::run` (which blocks, so it needs this multi-thread
+/// runtime) and `McpTool::call` against a live session.
+async fn assert_tool_trait(client: &McpClient) {
+    let tools = client.tools().await.expect("tools");
+    assert_eq!(tools.len(), all_tools().len());
+
+    let add = find_tool(&tools, "add");
+    assert!(add.output_schema().is_some());
+    assert_eq!(add.input_schema()["type"], json!("object"));
+    let boxed: BoxedTool = Box::new(add.clone());
+    assert_eq!(boxed.name(), "add");
+    assert!(!boxed.description().is_empty());
+    let out = boxed
+        .run(McpToolInput(args(json!({"a": 2, "b": 3}))))
+        .expect("run add");
+    assert_eq!(out.result["sum"].as_f64(), Some(5.0), "{}", out.result);
+
+    let boom = find_tool(&tools, "boom");
+    assert_err_contains(boom.call(Map::new()).await, "it broke");
+    let boxed_boom: BoxedTool = Box::new(boom);
+    assert_err_contains(boxed_boom.run(McpToolInput::default()), "it broke");
+    let echo = find_tool(&tools, "echo");
+    assert_eq!(
+        echo.call(args(json!({"text": "hi"}))).await.expect("echo"),
+        json!("hi")
+    );
+    let json_text = find_tool(&tools, "json_text");
+    assert_eq!(
+        json_text.call(Map::new()).await.expect("json_text"),
+        json!({"k": 1})
+    );
+}
+
+async fn tool_trait_over_http() {
+    let http = spawn_http(TestServer::default()).await;
+    let client = McpClient::connect(McpTransport::streamable_http(format!("{}/mcp", http.base)))
+        .await
+        .expect("connect http");
+    assert_tool_trait(&client).await;
+    client.close().await.expect("close");
+    http.shutdown().await;
+}
+
+async fn tool_trait_over_stdio() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    assert_tool_trait(&client).await;
+    client.close().await.expect("close");
+}
+
+/// `Tool::run` must return an error, not panic, on a current-thread runtime
+/// and outside any runtime.
+async fn tool_run_on_current_thread_runtime_errors() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    let tool = find_tool(&client.tools().await.expect("tools"), "echo");
+    let for_thread = tool.clone();
+    std::thread::spawn(move || {
+        let boxed: BoxedTool = Box::new(for_thread);
+        // Outside any runtime.
+        assert_err_contains(boxed.run(McpToolInput::default()), "multi-threaded");
+        // On a current-thread runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            assert_err_contains(boxed.run(McpToolInput::default()), "multi-threaded");
+        });
+    })
+    .join()
+    .expect("run must not panic");
+    client.close().await.expect("close");
 }

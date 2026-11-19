@@ -8,6 +8,7 @@
 //!
 //! - [`McpTransport`] / [`McpTransportType`] - how to reach the server
 //! - [`McpClient`] - the session: discovery and `tools/call`
+//! - [`McpTool`] - a discovered tool implementing [`Tool`](crate::tool::Tool)
 //! - [`McpToolDefinition`], [`McpResourceDefinition`], [`McpPromptDefinition`] - discovered metadata
 //!
 //! ```no_run
@@ -26,6 +27,7 @@
 mod client;
 mod definitions;
 mod result;
+mod tool;
 mod transport;
 
 pub use client::{McpClient, McpPaginationError};
@@ -33,4 +35,5 @@ pub use definitions::{
     McpPromptArgument, McpPromptDefinition, McpResourceDefinition, McpToolDefinition,
 };
 pub use rmcp::model::ServerCapabilities;
+pub use tool::{McpTool, McpToolInput, McpToolOutput};
 pub use transport::{McpTransport, McpTransportType};
