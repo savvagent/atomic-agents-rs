@@ -45,7 +45,9 @@ pub mod prelude {
     pub use crate::agent::{
         AgentConfig, AtomicAgent, ExtractionMode, HookEvent, HookHandler, PartialOutput,
     };
-    pub use crate::chat_history::{ChatHistory, ContentPart, Message, MessageContent, Role};
+    pub use crate::chat_history::{
+        BaseChatHistory, ChatHistory, ContentPart, Message, MessageContent, Role, VideoUrlContent,
+    };
     pub use crate::client::LlmClient;
     pub use crate::client::types::{
         ChatChunk, ChatMessage, ChatRequest, ChatResponse, ToolDefinition, Usage,
@@ -54,7 +56,9 @@ pub mod prelude {
     pub use crate::prompt::Prompt;
     pub use crate::resource::Resource;
     pub use crate::schema::{BasicChatInputSchema, BasicChatOutputSchema, IOSchema};
-    pub use crate::system_prompt::{ContextProvider, SystemPromptGenerator};
+    pub use crate::system_prompt::{
+        BaseSystemPromptGenerator, ContextProvider, SystemPromptGenerator,
+    };
     pub use crate::token_counter::{TokenCountResult, TokenCounter, get_token_counter};
     pub use crate::tool::{ComponentConfig, Tool};
 

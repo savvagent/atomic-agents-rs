@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use crate::chat_history::ChatHistory;
+use crate::chat_history::BaseChatHistory;
 use crate::client::LlmClient;
-use crate::system_prompt::SystemPromptGenerator;
+use crate::error::{Error, Result};
+use crate::system_prompt::BaseSystemPromptGenerator;
 
 /// Mode for extracting structured output from LLM responses.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExtractionMode {
     /// Use function/tool calling to extract structured output (most reliable).
     #[default]
@@ -24,18 +25,23 @@ pub struct AgentConfig<C: LlmClient> {
     pub client: C,
     /// The model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514").
     pub model: String,
-    /// Conversation history (auto-created if None).
-    pub history: Option<ChatHistory>,
-    /// System prompt generator (auto-created if None).
-    pub system_prompt_generator: Option<SystemPromptGenerator>,
+    /// Conversation history (an in-memory `ChatHistory` if None).
+    pub history: Option<Box<dyn BaseChatHistory>>,
+    /// System prompt generator (a default `SystemPromptGenerator` if None).
+    pub system_prompt_generator: Option<Box<dyn BaseSystemPromptGenerator>>,
     /// Role string for system messages (None disables system prompt).
     pub system_role: Option<String>,
-    /// Extraction mode for structured output.
-    pub mode: ExtractionMode,
+    /// Extraction mode for structured output. When `None`, the client's
+    /// [`default_extraction_mode`](LlmClient::default_extraction_mode) is used.
+    pub mode: Option<ExtractionMode>,
     /// Maximum retry attempts for structured output extraction.
     pub max_retries: usize,
     /// Additional provider-specific parameters (temperature, max_tokens, etc.).
     pub model_api_parameters: HashMap<String, serde_json::Value>,
+    /// Maximum tokens for the full context (system prompt + history + tools).
+    /// `None` disables trimming. Must be positive; a zero budget makes every
+    /// run fail with [`Error::Config`].
+    pub max_context_tokens: Option<usize>,
 }
 
 impl<C: LlmClient> AgentConfig<C> {
@@ -47,19 +53,20 @@ impl<C: LlmClient> AgentConfig<C> {
             history: None,
             system_prompt_generator: None,
             system_role: Some("system".to_string()),
-            mode: ExtractionMode::default(),
+            mode: None,
             max_retries: 3,
             model_api_parameters: HashMap::new(),
+            max_context_tokens: None,
         }
     }
 
-    pub fn with_history(mut self, history: ChatHistory) -> Self {
-        self.history = Some(history);
+    pub fn with_history(mut self, history: impl BaseChatHistory + 'static) -> Self {
+        self.history = Some(Box::new(history));
         self
     }
 
-    pub fn with_system_prompt(mut self, generator: SystemPromptGenerator) -> Self {
-        self.system_prompt_generator = Some(generator);
+    pub fn with_system_prompt(mut self, generator: impl BaseSystemPromptGenerator + 'static) -> Self {
+        self.system_prompt_generator = Some(Box::new(generator));
         self
     }
 
@@ -68,8 +75,9 @@ impl<C: LlmClient> AgentConfig<C> {
         self
     }
 
+    /// Sets the extraction mode explicitly, overriding the client's default.
     pub fn with_mode(mut self, mode: ExtractionMode) -> Self {
-        self.mode = mode;
+        self.mode = Some(mode);
         self
     }
 
@@ -82,4 +90,27 @@ impl<C: LlmClient> AgentConfig<C> {
         self.model_api_parameters.insert(key.into(), value);
         self
     }
+
+    /// Sets the maximum context size in tokens; the oldest turns are trimmed
+    /// when a run would exceed it.
+    ///
+    /// Returns [`Error::Config`] if `max_context_tokens` is zero.
+    ///
+    /// ```ignore
+    /// let config = AgentConfig::new(client, "gpt-4o").with_max_context_tokens(8_000)?;
+    /// ```
+    pub fn with_max_context_tokens(mut self, max_context_tokens: usize) -> Result<Self> {
+        validate_max_context_tokens(max_context_tokens)?;
+        self.max_context_tokens = Some(max_context_tokens);
+        Ok(self)
+    }
+}
+
+pub(crate) fn validate_max_context_tokens(value: usize) -> Result<()> {
+    if value == 0 {
+        return Err(Error::Config(
+            "max_context_tokens must be a positive number of tokens".to_string(),
+        ));
+    }
+    Ok(())
 }

@@ -14,6 +14,48 @@ pub trait ContextProvider: Send + Sync {
     fn get_info(&self) -> String;
 }
 
+/// Contract of a system prompt generator, so an agent can use a custom prompt
+/// builder instead of [`SystemPromptGenerator`] (mirrors upstream's
+/// `BaseSystemPromptGenerator`).
+///
+/// ```
+/// use atomic_agents::system_prompt::BaseSystemPromptGenerator;
+///
+/// struct Fixed;
+/// impl BaseSystemPromptGenerator for Fixed {
+///     fn generate_prompt(&self) -> String {
+///         "Be brief.".to_string()
+///     }
+/// }
+/// assert_eq!(Fixed.generate_prompt(), "Be brief.");
+/// ```
+pub trait BaseSystemPromptGenerator: Send + Sync {
+    /// Generates the complete system prompt string.
+    fn generate_prompt(&self) -> String;
+
+    /// Registers a dynamic context provider. Generators that do not support
+    /// context providers ignore the call.
+    fn register_context_provider(&mut self, _name: String, _provider: Box<dyn ContextProvider>) {}
+
+    /// Removes a context provider by name. Ignored by generators that do not
+    /// support context providers.
+    fn unregister_context_provider(&mut self, _name: &str) {}
+}
+
+impl BaseSystemPromptGenerator for SystemPromptGenerator {
+    fn generate_prompt(&self) -> String {
+        SystemPromptGenerator::generate_prompt(self)
+    }
+
+    fn register_context_provider(&mut self, name: String, provider: Box<dyn ContextProvider>) {
+        SystemPromptGenerator::register_context_provider(self, name, provider)
+    }
+
+    fn unregister_context_provider(&mut self, name: &str) {
+        SystemPromptGenerator::unregister_context_provider(self, name)
+    }
+}
+
 /// Constructs system prompts from structured components.
 ///
 /// Builds prompts with sections for background, steps, output instructions,
