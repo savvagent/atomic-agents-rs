@@ -78,14 +78,35 @@ impl TokenCounter {
     }
 
     /// Counts tokens across all context components with breakdown.
+    ///
+    /// The breakdown is additive: `system_prompt + history + tools == total`.
+    /// Request framing is counted once, over the complete message list, and is
+    /// attributed to the system prompt when system messages are present or to
+    /// history otherwise. Counting the system prompt and history independently
+    /// would charge that framing twice.
     pub fn count_context(
         model: &str,
         system_messages: &[ChatMessage],
         history_messages: &[ChatMessage],
         tools_json: Option<&str>,
     ) -> Result<TokenCountResult, Error> {
-        let system_prompt = Self::count_messages(model, system_messages)?;
-        let history = Self::count_messages(model, history_messages)?;
+        let system_prompt = if system_messages.is_empty() {
+            0
+        } else {
+            Self::count_messages(model, system_messages)?
+        };
+
+        let history = if history_messages.is_empty() {
+            0
+        } else {
+            let all: Vec<ChatMessage> = system_messages
+                .iter()
+                .chain(history_messages)
+                .cloned()
+                .collect();
+            Self::count_messages(model, &all)?.saturating_sub(system_prompt)
+        };
+
         let tools = match tools_json {
             Some(json) => Self::count_text(model, json)?,
             None => 0,
@@ -168,5 +189,68 @@ mod tests {
         assert!(result.history > 0);
         assert_eq!(result.tools, 0);
         assert!(result.utilization.is_some());
+    }
+
+    #[test]
+    fn test_count_text_has_no_chat_framing() {
+        let text = "Hello, world!";
+        let plain = TokenCounter::count_text("gpt-4o", text).unwrap();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::Value::String(text.to_string()),
+        }];
+        let framed = TokenCounter::count_messages("gpt-4o", &messages).unwrap();
+        assert!(plain < framed);
+    }
+
+    #[test]
+    fn test_count_context_breakdown_is_additive_without_double_framing() {
+        let model = "gpt-4o";
+        let system = vec![ChatMessage {
+            role: "system".to_string(),
+            content: serde_json::Value::String("You are helpful.".to_string()),
+        }];
+        let history = vec![ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::Value::String("Hi there".to_string()),
+        }];
+        let all: Vec<ChatMessage> = system.iter().chain(&history).cloned().collect();
+
+        let result =
+            TokenCounter::count_context(model, &system, &history, Some("{\"type\":\"object\"}"))
+                .unwrap();
+        let tools = TokenCounter::count_text(model, "{\"type\":\"object\"}").unwrap();
+
+        assert_eq!(
+            result.total,
+            result.system_prompt + result.history + result.tools
+        );
+        assert_eq!(result.tools, tools);
+        // Framing is charged once for the whole request.
+        assert_eq!(
+            result.system_prompt + result.history,
+            TokenCounter::count_messages(model, &all).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_count_context_history_only_carries_framing() {
+        let history = vec![ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::Value::String("Hi".to_string()),
+        }];
+        let result = TokenCounter::count_context("gpt-4o", &[], &history, None).unwrap();
+        assert_eq!(result.system_prompt, 0);
+        assert_eq!(
+            result.history,
+            TokenCounter::count_messages("gpt-4o", &history).unwrap()
+        );
+        assert_eq!(result.total, result.history);
+    }
+
+    #[test]
+    fn test_count_context_empty_is_zero() {
+        let result = TokenCounter::count_context("gpt-4o", &[], &[], None).unwrap();
+        assert_eq!(result.total, 0);
     }
 }
