@@ -21,3 +21,4 @@ pub mod searxng_search;
 pub mod bocha_search;
 pub mod arxiv_search;
 pub mod hackernews_search;
+pub mod wikipedia_search;
