@@ -40,6 +40,9 @@ const STDIO_FLAG: &str = "--mcp-test-server-stdio";
 const STDIO_TOOLS_ONLY_FLAG: &str = "--mcp-test-server-stdio-tools-only";
 /// Makes the child sleep without ever speaking MCP.
 const STDIO_SILENT_FLAG: &str = "--mcp-test-server-stdio-silent";
+/// Set in the harness process only; a stdio child sees it only when the
+/// transport inherits the full environment.
+const PARENT_ONLY_VAR: &str = "ATOMIC_AGENTS_MCP_TEST_PARENT_SECRET";
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Scenario = (&'static str, fn() -> BoxFuture<'static, ()>);
@@ -71,6 +74,9 @@ fn scenarios() -> Vec<Scenario> {
             request_timeout_keeps_session_usable().boxed()
         }),
         ("stdio_connect_timeout", || stdio_connect_timeout().boxed()),
+        ("stdio_env_is_allowlisted", || {
+            stdio_env_is_allowlisted().boxed()
+        }),
         ("closed_session_errors", || closed_session_errors().boxed()),
         ("tool_trait_over_http", || tool_trait_over_http().boxed()),
         ("tool_trait_over_stdio", || tool_trait_over_stdio().boxed()),
@@ -168,6 +174,8 @@ fn main() {
         std::process::exit(0);
     }
     support::logs::install();
+    // SAFETY: still single-threaded; no runtime or other thread exists yet.
+    unsafe { std::env::set_var(PARENT_ONLY_VAR, "parent-value") };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -472,6 +480,44 @@ async fn stdio_connect_timeout() {
         "{text}"
     );
     assert!(text.contains("initialize timed out after 0.3s"), "{text}");
+}
+
+/// Asks the stdio child (spawned over `transport`) for variable `name`.
+async fn child_env(transport: McpTransport, name: &str) -> Value {
+    let client = McpClient::connect(transport).await.expect("connect stdio");
+    let out = client
+        .call_tool("env", args(json!({"name": name})))
+        .await
+        .expect("env tool");
+    client.close().await.expect("close");
+    out
+}
+
+async fn stdio_env_is_allowlisted() {
+    assert_eq!(
+        std::env::var(PARENT_ONLY_VAR).as_deref(),
+        Ok("parent-value")
+    );
+    let default = child_env(stdio_transport(STDIO_FLAG), PARENT_ONLY_VAR).await;
+    assert_eq!(default["set"], json!(false), "{default}");
+    let path = child_env(stdio_transport(STDIO_FLAG), "PATH").await;
+    assert_eq!(
+        path["set"],
+        json!(true),
+        "allowlisted PATH is passed: {path}"
+    );
+    let inherited = child_env(
+        stdio_transport(STDIO_FLAG).with_inherited_env(),
+        PARENT_ONLY_VAR,
+    )
+    .await;
+    assert_eq!(inherited["value"], json!("parent-value"), "{inherited}");
+    let explicit = child_env(
+        stdio_transport(STDIO_FLAG).with_env("MCP_TEST_EXPLICIT", "given"),
+        "MCP_TEST_EXPLICIT",
+    )
+    .await;
+    assert_eq!(explicit["value"], json!("given"), "{explicit}");
 }
 
 async fn closed_session_errors() {

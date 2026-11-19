@@ -55,5 +55,6 @@ pub use resource::{McpResource, McpResourceContent, McpResourceOutput};
 pub use rmcp::model::ServerCapabilities;
 pub use tool::{McpTool, McpToolInput, McpToolOutput};
 pub use transport::{
-    DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, McpTransport, McpTransportType,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_INHERITED_ENV_VARS, DEFAULT_REQUEST_TIMEOUT, McpTransport,
+    McpTransportType,
 };

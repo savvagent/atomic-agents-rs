@@ -27,6 +27,31 @@ pub enum McpTransportType {
     Stdio,
 }
 
+/// Parent environment variables a stdio child receives by default, as in the
+/// upstream Python MCP SDK's `get_default_environment()`. A value starting
+/// with `()` (an exported shell function) is never passed.
+#[cfg(not(windows))]
+pub const DEFAULT_INHERITED_ENV_VARS: &[&str] =
+    &["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"];
+
+/// Parent environment variables a stdio child receives by default, as in the
+/// upstream Python MCP SDK's `get_default_environment()`. A value starting
+/// with `()` (an exported shell function) is never passed.
+#[cfg(windows)]
+pub const DEFAULT_INHERITED_ENV_VARS: &[&str] = &[
+    "APPDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "PATH",
+    "PROCESSOR_ARCHITECTURE",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "USERNAME",
+    "USERPROFILE",
+];
+
 /// Default time allowed for each MCP request; see
 /// [`McpTransport::with_request_timeout`].
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -47,6 +72,12 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum McpTransport {
     /// Spawn `command` and speak MCP over its stdin/stdout. The child's
     /// stderr is discarded so it cannot clutter the host terminal.
+    ///
+    /// The child does not inherit the parent's environment (which may hold
+    /// LLM API keys and other secrets): it gets only the variables in
+    /// [`DEFAULT_INHERITED_ENV_VARS`] that are set in the parent, then `env`.
+    /// Set `inherit_env` (see [`McpTransport::with_inherited_env`]) to pass
+    /// the full parent environment instead.
     Stdio {
         /// Program to run.
         command: String,
@@ -56,6 +87,8 @@ pub enum McpTransport {
         cwd: Option<PathBuf>,
         /// Extra environment variables for the child.
         env: Vec<(String, String)>,
+        /// Pass the parent's full environment rather than the allowlist.
+        inherit_env: bool,
         /// Time allowed for each request.
         request_timeout: Duration,
         /// Time allowed to spawn the child and complete `initialize`.
@@ -94,6 +127,7 @@ impl McpTransport {
             args,
             cwd: None,
             env: Vec::new(),
+            inherit_env: false,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
         }
@@ -207,6 +241,19 @@ impl McpTransport {
         self
     }
 
+    /// Passes the parent's full environment to the child instead of only
+    /// [`DEFAULT_INHERITED_ENV_VARS`]. Variables from
+    /// [`with_env`](Self::with_env) still apply on top.
+    ///
+    /// Only meaningful for [`McpTransport::Stdio`]; HTTP transports are
+    /// returned unchanged.
+    pub fn with_inherited_env(mut self) -> Self {
+        if let Self::Stdio { inherit_env, .. } = &mut self {
+            *inherit_env = true;
+        }
+        self
+    }
+
     /// Adds a request header. `Authorization: Bearer <token>` is sent through
     /// the transport's bearer-auth support.
     ///
@@ -278,6 +325,7 @@ impl std::fmt::Debug for McpTransport {
                 args,
                 cwd,
                 env,
+                inherit_env,
                 request_timeout,
                 connect_timeout,
             } => f
@@ -286,6 +334,7 @@ impl std::fmt::Debug for McpTransport {
                 .field("args", &format_args!("<{}>", args.len()))
                 .field("cwd", cwd)
                 .field("env_names", &names(env))
+                .field("inherit_env", inherit_env)
                 .field("request_timeout", request_timeout)
                 .field("connect_timeout", connect_timeout)
                 .finish(),
@@ -476,6 +525,16 @@ fn http_headers(
     Ok((bearer, parse_header_pairs(&rest)?.into_iter().collect()))
 }
 
+/// The allowlisted parent variables for a stdio child; see
+/// [`DEFAULT_INHERITED_ENV_VARS`].
+fn default_child_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    DEFAULT_INHERITED_ENV_VARS
+        .iter()
+        .filter_map(|&name| Some((name, std::env::var_os(name)?)))
+        .filter(|(_, value)| !value.as_encoded_bytes().starts_with(b"()"))
+        .collect()
+}
+
 /// Formats `d` as seconds for error text, e.g. `60s` or `0.2s`.
 pub(crate) fn secs(d: Duration) -> String {
     format!("{}s", d.as_secs_f64())
@@ -512,10 +571,15 @@ async fn open_transport(
             args,
             cwd,
             env,
+            inherit_env,
             ..
         } => {
             let mut cmd = tokio::process::Command::new(command);
-            cmd.args(args).envs(env.iter().map(|(k, v)| (k, v)));
+            cmd.args(args);
+            if !inherit_env {
+                cmd.env_clear().envs(default_child_env());
+            }
+            cmd.envs(env.iter().map(|(k, v)| (k, v)));
             if let Some(dir) = cwd {
                 cmd.current_dir(dir);
             }
@@ -736,6 +800,7 @@ mod tests {
                 args: vec![],
                 cwd: Some(PathBuf::from("/tmp")),
                 env: vec![("K".into(), "V".into())],
+                inherit_env: false,
                 request_timeout: DEFAULT_REQUEST_TIMEOUT,
                 connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             }
@@ -753,6 +818,30 @@ mod tests {
                 connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             }
         );
+    }
+
+    #[test]
+    fn inherited_env_only_touches_stdio() {
+        let t = McpTransport::stdio("srv", vec![]).with_inherited_env();
+        assert!(matches!(
+            t,
+            McpTransport::Stdio {
+                inherit_env: true,
+                ..
+            }
+        ));
+        assert!(format!("{t:?}").contains("inherit_env: true"));
+        let http = McpTransport::streamable_http("http://h");
+        assert_eq!(http.clone().with_inherited_env(), http);
+    }
+
+    #[test]
+    fn default_child_env_is_the_allowlist() {
+        for (name, _) in default_child_env() {
+            assert!(DEFAULT_INHERITED_ENV_VARS.contains(&name), "{name}");
+        }
+        #[cfg(not(windows))]
+        assert!(default_child_env().iter().any(|(n, _)| *n == "PATH"));
     }
 
     #[test]

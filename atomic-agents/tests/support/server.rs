@@ -123,6 +123,15 @@ pub fn all_tools() -> Vec<Tool> {
             "Sleeps for `ms` milliseconds, then returns",
             object(json!({"type": "object", "properties": {"ms": {"type": "number"}}})),
         ),
+        Tool::new(
+            "env",
+            "Reports whether environment variable `name` is set in the server process",
+            object(json!({
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"]
+            })),
+        ),
     ]
 }
 
@@ -215,6 +224,18 @@ impl ServerHandler for TestServer {
             )])),
             "stats" => Ok(CallToolResult::structured(self.counters.snapshot())),
             "sleep" => Ok(CallToolResult::success(vec![ContentBlock::text("slept")])),
+            "env" => {
+                let name = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let value = std::env::var(name).ok();
+                Ok(CallToolResult::structured(
+                    json!({"set": value.is_some(), "value": value}),
+                ))
+            }
             other => Err(McpError::invalid_params(
                 format!("unknown tool {other}"),
                 None,
