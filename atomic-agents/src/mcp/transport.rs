@@ -166,7 +166,7 @@ impl McpTransport {
 }
 
 /// Formats the transport for diagnostics. URLs are redacted with
-/// [`redact_url`], and header and environment values are omitted, because
+/// `redact_url`, and header and environment values are omitted, because
 /// all of them commonly carry credentials.
 impl std::fmt::Debug for McpTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
