@@ -39,14 +39,14 @@ Add `atomic-agents` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-atomic-agents = "0.1"
+atomic-agents = "0.2"
 ```
 
 By default, the OpenAI provider is enabled. Enable additional providers with feature flags:
 
 ```toml
 [dependencies]
-atomic-agents = { version = "0.1", features = ["openai", "anthropic", "google", "mcp"] }
+atomic-agents = { version = "0.2", features = ["openai", "anthropic", "google", "mcp"] }
 ```
 
 ### Quick Example
