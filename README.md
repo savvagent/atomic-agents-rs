@@ -185,6 +185,8 @@ Resources and prompts are available through `client.resources()` and `client.pro
 
 Use `McpTransport` directly for full control (`with_cwd`, `with_env`, `with_inherited_env`, `with_header`, `with_request_timeout`, `with_connect_timeout`). `Authorization: Bearer <token>` headers are supported on both HTTP transports.
 
+**Trust boundary:** a connected MCP server is inside your trust boundary. Its tool names, descriptions and schemas reach the LLM as-is and unmarked, so a malicious server can steer the model. `McpToolset::dispatch` only calls tools discovered from the server, but arguments are not validated against a tool's `input_schema`. Connect only to servers you trust.
+
 Notes:
 
 - `McpTool::run` blocks, so it needs a multi-threaded tokio runtime; use `McpTool::call` (async) otherwise.
@@ -193,7 +195,7 @@ Notes:
 - `input_required` and task replies from a server are reported as explicit `Error::Mcp` messages; they are not supported.
 - URL userinfo, query strings and fragments are redacted from error text, and HTTP client errors from the Streamable HTTP transport carry no URL, so rmcp's own `tracing` output does not leak them either.
 - HTTPS uses native-tls (OpenSSL on Linux, the platform TLS stack elsewhere), the same backend as the crate's other HTTP clients; the `mcp` feature adds no rustls.
-- The legacy SSE transport only accepts a same-origin POST endpoint, never follows redirects, allows 30 s to connect and caps each event at 16 MiB.
+- The legacy SSE transport only accepts a same-origin POST endpoint, never follows redirects, allows the connect timeout (30 s by default) to connect and caps each event at 16 MiB.
 - The orchestrator schema is deterministic (sorted keys) and lists `tool_name` first in `required`; it does not rely on property order.
 - The orchestrator schema drops each tool's own `$schema` and hoists its `$defs` into the root. Gemini function declarations do not support `$ref`/`$defs`, so tools whose schemas use them may need flattening for Google models.
 
