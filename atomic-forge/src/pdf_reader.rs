@@ -272,7 +272,9 @@ impl PdfReaderTool {
         if !path.exists() {
             return Err(format!("PDF not found at '{source}'."));
         }
-        if let Some(dir) = &self.allowed_dir {
+        // With a sandbox, only ever open the canonical path that was validated, so a
+        // symlink swapped in after the check cannot redirect the read.
+        let target = if let Some(dir) = &self.allowed_dir {
             let dir = dir
                 .canonicalize()
                 .map_err(|e| format!("Allowed directory is not accessible: {e}"))?;
@@ -282,13 +284,37 @@ impl PdfReaderTool {
             if !real.starts_with(&dir) {
                 return Err(format!("Access denied: '{source}' is outside the allowed directory."));
             }
-        }
-        if !path.is_file() {
+            Some((dir, real))
+        } else {
+            None
+        };
+        let open_path = target.as_ref().map_or(&path, |(_, real)| real);
+        let mut file = tokio::fs::File::open(open_path)
+            .await
+            .map_err(|e| format!("Failed to read '{source}': {e}"))?;
+        let meta = file
+            .metadata()
+            .await
+            .map_err(|e| format!("Failed to read '{source}': {e}"))?;
+        if !meta.is_file() {
             return Err(format!("'{source}' is not a file."));
         }
-        tokio::fs::read(&path)
+        // Re-validate through the open handle: the file we actually hold must still
+        // live inside the allowed directory.
+        #[cfg(target_os = "linux")]
+        if let Some((dir, _)) = &target {
+            use std::os::fd::AsRawFd;
+            let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+                .map_err(|e| format!("Failed to verify '{source}': {e}"))?;
+            if !opened.starts_with(dir) {
+                return Err(format!("Access denied: '{source}' is outside the allowed directory."));
+            }
+        }
+        let mut data = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data)
             .await
-            .map_err(|e| format!("Failed to read '{source}': {e}"))
+            .map_err(|e| format!("Failed to read '{source}': {e}"))?;
+        Ok(data)
     }
 
     fn info_dictionary(doc: &Document) -> Option<&Dictionary> {
@@ -668,6 +694,30 @@ mod tests {
         let escape = format!("{}/../secret.pdf", allowed.display());
         let out = tool.run(input(&escape)).unwrap();
         assert!(out.error.unwrap().contains("outside the allowed directory"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn allowed_dir_blocks_symlink_escape() {
+        let base = std::env::temp_dir().join(format!("atomic_forge_pdf_link_{}", std::process::id()));
+        let allowed = base.join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        std::fs::write(base.join("secret.pdf"), sample_pdf(&["Outside"])).unwrap();
+        std::os::unix::fs::symlink(base.join("secret.pdf"), allowed.join("link.pdf")).unwrap();
+        std::os::unix::fs::symlink(&base, allowed.join("linkdir")).unwrap();
+        let tool = PdfReaderTool::new(PdfReaderConfig {
+            allowed_dir: Some(allowed.clone()),
+            ..Default::default()
+        });
+        for name in ["link.pdf", "linkdir/secret.pdf"] {
+            let out = tool.run(input(allowed.join(name).to_str().unwrap())).unwrap();
+            assert!(out.error.unwrap().contains("outside the allowed directory"), "{name}");
+        }
+        // A directory inside the sandbox is not a regular file.
+        std::fs::create_dir(allowed.join("sub.pdf")).unwrap();
+        let out = tool.run(input(allowed.join("sub.pdf").to_str().unwrap())).unwrap();
+        assert!(out.error.unwrap().contains("not a file"));
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -2,6 +2,8 @@ use atomic_agents::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::net_guard::NetGuard;
+
 /// Scrape a webpage and extract its content as plain text.
 #[derive(IOSchema, Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct WebpageScraperInput {
@@ -41,11 +43,18 @@ pub struct WebpageScraperOutput {
 }
 
 /// Configuration for the webpage scraper.
+///
+/// Fetches go through [`NetGuard`]: by default loopback, private, link-local
+/// (cloud metadata) and other non-public addresses are refused, redirects are
+/// validated hop by hop, and connections are pinned to the validated IPs. Set
+/// `allow_private_hosts` to `true` only for trusted URLs (e.g. local testing).
 pub struct WebpageScraperConfig {
     pub component: ComponentConfig,
     pub user_agent: String,
     pub timeout_secs: u64,
     pub max_content_length: usize,
+    /// Allow fetching loopback/private/link-local hosts. Defaults to `false`.
+    pub allow_private_hosts: bool,
 }
 
 impl Default for WebpageScraperConfig {
@@ -57,6 +66,7 @@ impl Default for WebpageScraperConfig {
             user_agent: "Mozilla/5.0 (compatible; AtomicAgents/1.0)".to_string(),
             timeout_secs: 30,
             max_content_length: 1_000_000,
+            allow_private_hosts: false,
         }
     }
 }
@@ -64,30 +74,27 @@ impl Default for WebpageScraperConfig {
 /// Tool for scraping webpages and extracting text content.
 pub struct WebpageScraperTool {
     config: ComponentConfig,
-    client: reqwest::Client,
+    guard: NetGuard,
+    user_agent: String,
+    timeout: std::time::Duration,
     max_content_length: usize,
 }
 
 impl WebpageScraperTool {
     pub fn new(scraper_config: WebpageScraperConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .user_agent(&scraper_config.user_agent)
-            .timeout(std::time::Duration::from_secs(scraper_config.timeout_secs))
-            .build()
-            .expect("Failed to create HTTP client");
-
         Self {
             config: scraper_config.component,
-            client,
+            guard: NetGuard::new(scraper_config.allow_private_hosts),
+            user_agent: scraper_config.user_agent,
+            timeout: std::time::Duration::from_secs(scraper_config.timeout_secs),
             max_content_length: scraper_config.max_content_length,
         }
     }
 
     async fn scrape(&self, url: &str, include_links: bool) -> std::result::Result<WebpageScraperOutput, Error> {
         let mut response = self
-            .client
-            .get(url)
-            .send()
+            .guard
+            .get(url, &self.user_agent, "text/html,application/xhtml+xml,*/*;q=0.8", self.timeout)
             .await
             .map_err(|e| Error::Validation(format!("Failed to fetch URL: {e}")))?;
 
@@ -338,6 +345,34 @@ mod network_tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn local_tool() -> WebpageScraperTool {
+        WebpageScraperTool::new(WebpageScraperConfig { allow_private_hosts: true, ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn default_config_rejects_private_hosts() {
+        let tool = WebpageScraperTool::default();
+        for url in ["http://127.0.0.1/", "http://169.254.169.254/latest/meta-data"] {
+            let err = tool.scrape(url, true).await.unwrap_err().to_string();
+            assert!(err.contains("non-public"), "{url}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn links_resolve_against_final_url_after_redirect() {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", "/dir/final"))
+            .mount(&server)
+            .await;
+        Mock::given(wiremock::matchers::path("/dir/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"<body><a href="rel">x</a></body>"#))
+            .mount(&server)
+            .await;
+        let out = local_tool().scrape(&format!("{}/start", server.uri()), true).await.unwrap();
+        assert!(out.content.contains(&format!("[x]({}/dir/rel)", server.uri())), "{}", out.content);
+    }
+
     #[test]
     fn decodes_using_content_type_charset() {
         // "café" in ISO-8859-1 / windows-1252.
@@ -370,11 +405,11 @@ mod network_tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(format!("<html><body>{}</body></html>", "a".repeat(500))))
             .mount(&server)
             .await;
-        let cfg = WebpageScraperConfig { max_content_length: 100, ..Default::default() };
+        let cfg = WebpageScraperConfig { max_content_length: 100, allow_private_hosts: true, ..Default::default() };
         let tool = WebpageScraperTool::new(cfg);
         assert!(tool.scrape(&server.uri(), true).await.is_err());
 
-        let tool = WebpageScraperTool::default();
+        let tool = local_tool();
         let r = tool.scrape(&server.uri(), true).await.unwrap();
         assert!(r.content.starts_with('a'));
     }
