@@ -71,13 +71,16 @@ fn scenarios() -> Vec<Scenario> {
         ("resource_read_error_redacts_query", || {
             resource_read_error_redacts_query().boxed()
         }),
+        ("resource_read_on_current_thread_runtime_errors", || {
+            resource_read_on_current_thread_runtime_errors().boxed()
+        }),
         ("prompts_over_http", || prompts_over_http().boxed()),
         ("prompts_over_stdio", || prompts_over_stdio().boxed()),
         ("prompt_generate_on_current_thread_runtime_errors", || {
             prompt_generate_on_current_thread_runtime_errors().boxed()
         }),
-        ("resource_read_on_current_thread_runtime_errors", || {
-            resource_read_on_current_thread_runtime_errors().boxed()
+        ("prompt_get_error_redacts_query", || {
+            prompt_get_error_redacts_query().boxed()
         }),
     ]
 }
@@ -646,8 +649,23 @@ async fn assert_prompts(client: &McpClient) {
     let via_async = greet.get(args(json!({"name": "Ada"}))).await.expect("get");
     assert_eq!(via_async, out);
 
-    assert!(boxed.generate(McpToolInput::default()).is_err());
-    assert!(client.get_prompt("nope", Map::new()).await.is_err());
+    let missing = boxed
+        .generate(McpToolInput::default())
+        .expect_err("missing argument");
+    let text = missing.to_string();
+    assert!(
+        text.contains("prompts/get") && text.contains("greet"),
+        "{text}"
+    );
+    let unknown = client
+        .get_prompt("nope", Map::new())
+        .await
+        .expect_err("unknown prompt");
+    let text = unknown.to_string();
+    assert!(
+        text.contains("prompts/get") && text.contains("nope"),
+        "{text}"
+    );
 }
 
 async fn prompts_over_http() {
@@ -689,4 +707,24 @@ async fn prompt_generate_on_current_thread_runtime_errors() {
     .join()
     .expect("generate must not panic");
     client.close().await.expect("close");
+}
+
+/// The server echoes the requested prompt name in its error, and a caller
+/// may pass a name carrying the endpoint's secret; `prompts/get` errors must
+/// be scrubbed like every other MCP error.
+async fn prompt_get_error_redacts_query() {
+    let http = spawn_http(TestServer::default()).await;
+    let endpoint = format!("{}/mcp?token=secret123", http.base);
+    let client = McpClient::connect_endpoint(&endpoint, McpTransportType::HttpStream)
+        .await
+        .expect("connect http endpoint");
+    let err = client
+        .get_prompt("nope?token=secret123", Map::new())
+        .await
+        .expect_err("unknown prompt");
+    let text = err.to_string();
+    assert!(text.contains("prompts/get"), "{text}");
+    assert!(!text.contains("secret123"), "secret leaked: {text}");
+    client.close().await.expect("close");
+    http.shutdown().await;
 }

@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::RoleClient;
 use rmcp::model::{
-    CallToolRequestParams, ClientConfig, ErrorCode, GetPromptRequestParams, PaginatedRequestParams,
-    ReadResourceRequestParams, ServerCapabilities, ServerPeerInfo,
+    CallToolRequestParams, CallToolResponse, ClientConfig, ErrorCode, GetPromptRequestParams,
+    GetPromptResponse, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResponse,
+    ServerCapabilities, ServerPeerInfo,
 };
 use rmcp::service::{Peer, RunningService, ServiceError};
 use serde_json::{Map, Value};
@@ -182,16 +183,12 @@ impl McpClient {
     /// [`McpResource::uri_for`].
     pub async fn read_resource(&self, uri: &str) -> Result<McpResourceOutput> {
         let peer = self.peer()?;
-        let result = peer
-            .read_resource(ReadResourceRequestParams::new(uri))
-            .await
-            .map_err(|e| {
-                Error::Mcp(
-                    self.inner
-                        .scrubber
-                        .scrub(&format!("resources/read '{uri}' failed: {e}")),
-                )
-            })?;
+        let result = self.complete(
+            "resources/read",
+            uri,
+            peer.read_resource_once(ReadResourceRequestParams::new(uri))
+                .await,
+        )?;
         McpResourceOutput::from_contents(result.contents)
     }
 
@@ -227,16 +224,12 @@ impl McpClient {
         args: Map<String, Value>,
     ) -> Result<McpPromptOutput> {
         let peer = self.peer()?;
-        let result = peer
-            .get_prompt(GetPromptRequestParams::new(name).with_arguments(args))
-            .await
-            .map_err(|e| {
-                Error::Mcp(
-                    self.inner
-                        .scrubber
-                        .scrub(&format!("prompts/get '{name}' failed: {e}")),
-                )
-            })?;
+        let result = self.complete(
+            "prompts/get",
+            name,
+            peer.get_prompt_once(GetPromptRequestParams::new(name).with_arguments(args))
+                .await,
+        )?;
         McpPromptOutput::from_result(result)
     }
 
@@ -248,17 +241,27 @@ impl McpClient {
     /// `isError: true` and JSON-RPC errors (such as an unknown tool) are `Err`.
     pub async fn call_tool(&self, name: &str, args: Map<String, Value>) -> Result<Value> {
         let peer = self.peer()?;
-        let result = peer
-            .call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(args))
-            .await
-            .map_err(|e| {
-                Error::Mcp(
-                    self.inner
-                        .scrubber
-                        .scrub(&format!("tools/call '{name}' failed: {e}")),
-                )
-            })?;
+        let result = self.complete(
+            "tools/call",
+            name,
+            peer.call_tool_once(CallToolRequestParams::new(name.to_string()).with_arguments(args))
+                .await,
+        )?;
         extract_tool_result(name, result)
+    }
+
+    /// Turns the reply to a `*_once` request into its completed result,
+    /// scrubbing any error text.
+    fn complete<R: Into<Reply<T>>, T>(
+        &self,
+        method: &str,
+        subject: &str,
+        reply: std::result::Result<R, ServiceError>,
+    ) -> Result<T> {
+        reply
+            .map_err(|e| format!("{method} '{subject}' failed: {e}"))
+            .and_then(|r| r.into().into_complete(method, subject))
+            .map_err(|msg| Error::Mcp(self.inner.scrubber.scrub(&msg)))
     }
 
     /// Gracefully ends the session for every clone. Idempotent; afterwards
@@ -277,6 +280,68 @@ impl McpClient {
                     .scrubber
                     .scrub(&format!("failed to close MCP session: {e}")),
             )),
+        }
+    }
+}
+
+/// A reply to `tools/call`, `resources/read` or `prompts/get`, reduced to the
+/// cases this client can act on. rmcp's `*_once` calls return these
+/// without driving the multi round-trip (MRTR) follow-ups; the plain calls
+/// would turn a non-complete reply into an opaque "Unexpected response type".
+enum Reply<T> {
+    Complete(T),
+    InputRequired,
+    Task,
+    /// A variant added to rmcp's `#[non_exhaustive]` response enums.
+    Other,
+}
+
+impl<T> Reply<T> {
+    /// The completed result, or the (unscrubbed) error message for any other
+    /// reply.
+    fn into_complete(self, method: &str, subject: &str) -> std::result::Result<T, String> {
+        match self {
+            Self::Complete(t) => Ok(t),
+            Self::InputRequired => Err(format!(
+                "{method} '{subject}' failed: server requested additional input (input_required), which this client does not support"
+            )),
+            Self::Task => Err(format!(
+                "{method} '{subject}' failed: server returned a task, which this client does not support"
+            )),
+            Self::Other => Err(format!(
+                "{method} '{subject}' failed: server returned an unsupported response type"
+            )),
+        }
+    }
+}
+
+impl From<CallToolResponse> for Reply<rmcp::model::CallToolResult> {
+    fn from(r: CallToolResponse) -> Self {
+        match r {
+            CallToolResponse::Complete(t) => Self::Complete(t),
+            CallToolResponse::InputRequired(_) => Self::InputRequired,
+            CallToolResponse::Task(_) => Self::Task,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl From<ReadResourceResponse> for Reply<rmcp::model::ReadResourceResult> {
+    fn from(r: ReadResourceResponse) -> Self {
+        match r {
+            ReadResourceResponse::Complete(t) => Self::Complete(t),
+            ReadResourceResponse::InputRequired(_) => Self::InputRequired,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl From<GetPromptResponse> for Reply<rmcp::model::GetPromptResult> {
+    fn from(r: GetPromptResponse) -> Self {
+        match r {
+            GetPromptResponse::Complete(t) => Self::Complete(t),
+            GetPromptResponse::InputRequired(_) => Self::InputRequired,
+            _ => Self::Other,
         }
     }
 }
@@ -444,5 +509,34 @@ mod tests {
                 .as_deref(),
             Some("c")
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn complete_passes_through() {
+        assert_eq!(Reply::Complete(7).into_complete("m", "s"), Ok(7));
+    }
+
+    #[test]
+    fn non_complete_replies_are_explicit_errors() {
+        let err = Reply::<()>::InputRequired
+            .into_complete("prompts/get", "p")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "prompts/get 'p' failed: server requested additional input (input_required), which this client does not support"
+        );
+        let err = Reply::<()>::Task
+            .into_complete("tools/call", "t")
+            .unwrap_err();
+        assert!(err.contains("server returned a task"), "{err}");
+        let err = Reply::<()>::Other
+            .into_complete("tools/call", "t")
+            .unwrap_err();
+        assert!(err.contains("unsupported response type"), "{err}");
     }
 }

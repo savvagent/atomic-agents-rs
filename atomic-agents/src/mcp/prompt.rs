@@ -44,12 +44,13 @@ impl McpPromptOutput {
             if let ContentBlock::Text(t) = &message.content {
                 texts.push(t.text.clone());
             }
-            let role = match serde_json::to_value(message.role) {
+            let role = match serde_json::to_value(&message.role) {
                 Ok(Value::String(role)) => role,
                 _ => {
-                    return Err(Error::Mcp(
-                        "prompts/get returned a message with an unsupported role".to_string(),
-                    ));
+                    return Err(Error::Mcp(format!(
+                        "prompts/get returned a message with an unsupported role: {:?}",
+                        message.role
+                    )));
                 }
             };
             let content = serde_json::to_value(&message.content).map_err(|e| {
