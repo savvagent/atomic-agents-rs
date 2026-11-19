@@ -73,7 +73,7 @@ impl App {
                     false
                 }
                 Some(crate::screens::main_menu::MenuAction::OpenGithub) => {
-                    let _ = open::that("https://github.com/BrainBlend-AI/atomic-agents");
+                    let _ = open::that("https://github.com/Eigenwise/atomic-agents");
                     false
                 }
                 Some(crate::screens::main_menu::MenuAction::Quit) => true,

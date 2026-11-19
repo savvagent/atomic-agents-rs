@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-const GITHUB_URL: &str = "https://github.com/BrainBlend-AI/atomic-agents.git";
+const GITHUB_URL: &str = "https://github.com/Eigenwise/atomic-agents.git";
 
 /// Clones the atomic-agents repository to a temporary directory.
 pub fn clone_repo() -> Result<PathBuf, String> {

@@ -4,7 +4,7 @@
 
 ## What is Atomic Agents?
 
-Atomic Agents is a lightweight, modular framework for building AI agent pipelines with structured LLM outputs. This is the **Rust port** of the [Python Atomic Agents framework](https://github.com/BrainBlend-AI/atomic-agents).
+Atomic Agents is a lightweight, modular framework for building AI agent pipelines with structured LLM outputs. This is the **Rust port** of the [Python Atomic Agents framework](https://github.com/Eigenwise/atomic-agents).
 
 Think of it like building AI applications with LEGO blocks — each component (agent, tool, context provider) is:
 - **Single-purpose**: Does one thing well
