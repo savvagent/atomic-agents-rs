@@ -60,4 +60,4 @@ required-features = ["mcp"]
 
 [[example]]
 name = "mcp_agent"
-required-features = ["mcp"]
+required-features = ["mcp", "openai"]

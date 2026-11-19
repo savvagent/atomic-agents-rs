@@ -70,7 +70,9 @@ impl McpDefinitionService {
         }
         let client = McpClient::connect(transport).await?;
         let result = f(client.clone()).await;
-        let _ = client.close().await;
+        if let Err(e) = client.close().await {
+            tracing::debug!("closing one-shot MCP session failed: {e}");
+        }
         result
     }
 }

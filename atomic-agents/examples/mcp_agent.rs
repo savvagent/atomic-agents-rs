@@ -30,7 +30,8 @@ fn transport_from_env() -> Result<McpTransportType> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| Error::Config("OPENAI_API_KEY must be set".into()))?;
     let endpoint =
         std::env::var("MCP_ENDPOINT").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let kind = transport_from_env()?;
