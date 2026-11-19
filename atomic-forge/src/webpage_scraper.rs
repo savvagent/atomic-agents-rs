@@ -84,7 +84,7 @@ impl WebpageScraperTool {
     }
 
     async fn scrape(&self, url: &str, include_links: bool) -> std::result::Result<WebpageScraperOutput, Error> {
-        let response = self
+        let mut response = self
             .client
             .get(url)
             .send()
@@ -94,17 +94,22 @@ impl WebpageScraperTool {
         let final_url = response.url().clone();
         let domain = final_url.host_str().unwrap_or("").to_string();
 
-        let html = response
-            .text()
-            .await
-            .map_err(|e| Error::Validation(format!("Failed to read response: {e}")))?;
-
-        if html.len() > self.max_content_length {
-            return Err(Error::Validation(format!(
-                "Content exceeds maximum length of {} bytes",
-                self.max_content_length
-            )));
+        // Stream the body so oversized responses are rejected without buffering them fully.
+        if response.content_length().is_some_and(|l| l > self.max_content_length as u64) {
+            return Err(too_large(self.max_content_length));
         }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Error::Validation(format!("Failed to read response: {e}")))?
+        {
+            if body.len() + chunk.len() > self.max_content_length {
+                return Err(too_large(self.max_content_length));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let html = String::from_utf8_lossy(&body).into_owned();
 
         let document = scraper::Html::parse_document(&html);
 
@@ -135,9 +140,18 @@ impl WebpageScraperTool {
             .map(String::from);
 
         // Extract main text content
+        let base_selector = scraper::Selector::parse("base[href]").unwrap();
+        let base_url = document
+            .select(&base_selector)
+            .next()
+            .and_then(|el| el.value().attr("href"))
+            .and_then(|href| final_url.join(href.trim()).ok())
+            .filter(|u| !matches!(u.scheme(), "data" | "javascript"))
+            .unwrap_or_else(|| final_url.clone());
+
         let body_selector = scraper::Selector::parse("body").unwrap();
         let content = if let Some(body) = document.select(&body_selector).next() {
-            extract_text(body, include_links)
+            extract_text(body, include_links, &base_url, false)
         } else {
             String::new()
         };
@@ -176,11 +190,24 @@ impl Tool for WebpageScraperTool {
     }
 }
 
+fn too_large(max: usize) -> Error {
+    Error::Validation(format!("Content exceeds maximum length of {max} bytes"))
+}
+
+/// Resolves `href` against `base`, falling back to the raw value when it cannot be parsed.
+fn resolve_href(base: &url::Url, href: &str) -> String {
+    base.join(href.trim()).map(String::from).unwrap_or_else(|_| href.to_string())
+}
+
 /// Extracts text from an HTML element, optionally preserving links.
-fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
+///
+/// Links are resolved against `base`. `header`/`footer` elements nested inside
+/// `main`/`article`/`section` are kept (they hold headings and attribution);
+/// page-level ones are dropped. `in_section` tracks that nesting.
+fn extract_text(element: scraper::ElementRef, include_links: bool, base: &url::Url, in_section: bool) -> String {
     let mut text = String::new();
     // Remove script and style elements by skipping them
-    let skip_tags = ["script", "style", "noscript", "nav", "footer", "header"];
+    let skip_tags = ["script", "style", "noscript", "nav"];
 
     for node in element.children() {
         match node.value() {
@@ -193,17 +220,18 @@ fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
             }
             scraper::Node::Element(el) => {
                 let tag = el.name();
-                if skip_tags.contains(&tag) {
+                if skip_tags.contains(&tag) || (!in_section && matches!(tag, "header" | "footer")) {
                     continue;
                 }
+                let child_in_section = in_section || matches!(tag, "main" | "article" | "section");
 
                 if let Some(child_ref) = scraper::ElementRef::wrap(node) {
-                    let child_text = extract_text(child_ref, include_links);
+                    let child_text = extract_text(child_ref, include_links, base, child_in_section);
 
                     if include_links && tag == "a" {
                         if let Some(href) = el.attr("href") {
                             if !child_text.trim().is_empty() {
-                                text.push_str(&format!("[{}]({})", child_text.trim(), href));
+                                text.push_str(&format!("[{}]({})", child_text.trim(), resolve_href(base, href)));
                                 text.push(' ');
                                 continue;
                             }
@@ -233,4 +261,54 @@ fn extract_text(element: scraper::ElementRef, include_links: bool) -> String {
         .filter(|l| !l.is_empty())
         .collect();
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extract(html: &str, base: &str) -> String {
+        let doc = scraper::Html::parse_document(html);
+        let sel = scraper::Selector::parse("body").unwrap();
+        let body = doc.select(&sel).next().unwrap();
+        extract_text(body, true, &url::Url::parse(base).unwrap(), false)
+    }
+
+    #[test]
+    fn links_resolve_against_final_url() {
+        let out = extract(r#"<body><p><a href="/a/b">x</a> <a href="rel">y</a></p></body>"#, "https://example.com/dir/page");
+        assert!(out.contains("[x](https://example.com/a/b)"), "{out}");
+        assert!(out.contains("[y](https://example.com/dir/rel)"), "{out}");
+    }
+
+    #[test]
+    fn page_level_header_footer_dropped_but_article_ones_kept() {
+        let html = "<body><header>Site</header><article><header><h1>Title</h1>By Ann</header><p>Body</p><footer>Source X</footer></article><footer>Copyright</footer></body>";
+        let out = extract(html, "https://e.com/");
+        assert!(!out.contains("Site") && !out.contains("Copyright"), "{out}");
+        assert!(out.contains("Title") && out.contains("By Ann") && out.contains("Source X"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_body_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!("<html><body>{}</body></html>", "a".repeat(500))))
+            .mount(&server)
+            .await;
+        let cfg = WebpageScraperConfig { max_content_length: 100, ..Default::default() };
+        let tool = WebpageScraperTool::new(cfg);
+        assert!(tool.scrape(&server.uri(), true).await.is_err());
+
+        let tool = WebpageScraperTool::default();
+        let r = tool.scrape(&server.uri(), true).await.unwrap();
+        assert!(r.content.starts_with('a'));
+    }
 }
