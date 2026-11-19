@@ -9,10 +9,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/BrainBlend-AI/atomic-agents-rs"
+repository = "https://github.com/savvagent/atomic-agents-rs"
+homepage = "https://github.com/savvagent/atomic-agents-rs"
 keywords = ["ai", "agents", "llm", "pipeline", "structured-output"]
 categories = ["science"]
 

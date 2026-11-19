@@ -2,7 +2,12 @@
 name = "atomic-assembler"
 version.workspace = true
 edition.workspace = true
+publish = false
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "TUI tool for browsing and downloading atomic-forge tools"
 
 [[bin]]

@@ -210,7 +210,7 @@ Atomic Agents uses a Cargo workspace with the following crates:
 For local development:
 
 ```bash
-git clone https://github.com/BrainBlend-AI/atomic-agents-rs.git
+git clone https://github.com/savvagent/atomic-agents-rs.git
 cd atomic-agents-rs
 cargo build
 cargo test

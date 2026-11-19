@@ -4,12 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
+documentation = "https://docs.rs/atomic-agents"
 description = "A lightweight, modular framework for building AI agent pipelines with structured LLM outputs"
 
 [dependencies]
-atomic-agents-macros = { version = "0.1.0", path = "../atomic-agents-macros" }
+atomic-agents-macros = { version = "0.1.1", path = "../atomic-agents-macros" }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
