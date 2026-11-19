@@ -7,13 +7,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::RoleClient;
 use rmcp::model::{
-    CallToolRequestParams, ClientConfig, ErrorCode, PaginatedRequestParams, ServerCapabilities,
-    ServerPeerInfo,
+    CallToolRequestParams, ClientConfig, ErrorCode, PaginatedRequestParams,
+    ReadResourceRequestParams, ServerCapabilities, ServerPeerInfo,
 };
 use rmcp::service::{Peer, RunningService, ServiceError};
 use serde_json::{Map, Value};
 
 use super::definitions::{McpPromptDefinition, McpResourceDefinition, McpToolDefinition};
+use super::resource::{McpResource, McpResourceOutput};
 use super::result::extract_tool_result;
 use super::tool::McpTool;
 use super::transport::{McpTransport, McpTransportType, UrlScrubber, connect_transport};
@@ -161,6 +162,36 @@ impl McpClient {
                     .map(McpResourceDefinition::from_template),
             )
             .collect())
+    }
+
+    /// Lists every resource and template as an [`McpResource`] bound to this
+    /// session.
+    pub async fn resources(&self) -> Result<Vec<McpResource>> {
+        Ok(self
+            .list_resources()
+            .await?
+            .into_iter()
+            .map(|def| McpResource::from_definition(def, self.clone()))
+            .collect())
+    }
+
+    /// Reads the concrete resource `uri` (`resources/read`).
+    ///
+    /// `uri` is sent verbatim; to read a template, fill it first with
+    /// [`McpResource::uri_for`].
+    pub async fn read_resource(&self, uri: &str) -> Result<McpResourceOutput> {
+        let peer = self.peer()?;
+        let result = peer
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .map_err(|e| {
+                Error::Mcp(
+                    self.inner
+                        .scrubber
+                        .scrub(&format!("resources/read '{uri}' failed: {e}")),
+                )
+            })?;
+        McpResourceOutput::from_contents(result.contents)
     }
 
     /// Lists every prompt, following pagination. Empty when the server does

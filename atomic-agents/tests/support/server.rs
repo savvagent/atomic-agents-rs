@@ -50,6 +50,7 @@ pub struct TestServer {
     counters: Arc<Counters>,
     tools_only: bool,
     repeat_cursor: bool,
+    no_templates: bool,
 }
 
 impl TestServer {
@@ -65,6 +66,15 @@ impl TestServer {
     pub fn repeating_cursor() -> Self {
         Self {
             repeat_cursor: true,
+            ..Self::default()
+        }
+    }
+
+    /// A server that answers `resources/templates/list` with `METHOD_NOT_FOUND`
+    /// while still advertising `resources`.
+    pub fn without_templates() -> Self {
+        Self {
+            no_templates: true,
             ..Self::default()
         }
     }
@@ -223,6 +233,11 @@ impl ServerHandler for TestServer {
         _cx: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListResourceTemplatesResult, McpError>> + MaybeSendFuture + '_
     {
+        if self.no_templates {
+            return std::future::ready(Err(McpError::method_not_found::<
+                ListResourceTemplatesRequestMethod,
+            >()));
+        }
         std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
             ResourceTemplate::new("mem://notes/{id}", "note").with_mime_type("text/plain"),
         ])))

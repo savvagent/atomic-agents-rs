@@ -115,7 +115,7 @@ impl Tool for McpTool {
     }
 
     fn run(&self, input: Self::Input) -> Result<Self::Output> {
-        block_on_multi_thread(self.call(input.0))
+        block_on_multi_thread(self.call(input.0), "McpTool::run", "McpTool::call")
             .and_then(|r| r.map(|result| McpToolOutput { result }))
     }
 }
@@ -124,15 +124,20 @@ impl Tool for McpTool {
 ///
 /// `block_in_place` panics on a current-thread runtime and `Handle::current`
 /// panics outside any runtime, so both cases are reported as an error instead.
-pub(crate) fn block_on_multi_thread<F: Future>(fut: F) -> Result<F::Output> {
+/// `sync_name` and `async_name` name the blocking entry point and its async
+/// counterpart in that error.
+pub(crate) fn block_on_multi_thread<F: Future>(
+    fut: F,
+    sync_name: &str,
+    async_name: &str,
+) -> Result<F::Output> {
     match Handle::try_current() {
         Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => {
             Ok(tokio::task::block_in_place(|| h.block_on(fut)))
         }
-        _ => Err(Error::Mcp(
-            "McpTool::run requires a multi-threaded tokio runtime; use McpTool::call in async code"
-                .to_string(),
-        )),
+        _ => Err(Error::Mcp(format!(
+            "{sync_name} requires a multi-threaded tokio runtime; use {async_name} in async code"
+        ))),
     }
 }
 
@@ -167,18 +172,25 @@ mod tests {
 
     #[test]
     fn blocking_outside_a_runtime_errors() {
-        let err = block_on_multi_thread(async { 1 }).unwrap_err();
+        let err = block_on_multi_thread(async { 1 }, "A::run", "A::call").unwrap_err();
         assert!(err.to_string().contains("multi-threaded"), "{err}");
+        assert_eq!(
+            err.to_string().trim_start_matches("MCP error: "),
+            "A::run requires a multi-threaded tokio runtime; use A::call in async code"
+        );
     }
 
     #[tokio::test]
     async fn blocking_on_current_thread_errors() {
-        let err = block_on_multi_thread(async { 1 }).unwrap_err();
+        let err = block_on_multi_thread(async { 1 }, "A::run", "A::call").unwrap_err();
         assert!(err.to_string().contains("multi-threaded"), "{err}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn blocking_on_multi_thread_runs() {
-        assert_eq!(block_on_multi_thread(async { 7 }).unwrap(), 7);
+        assert_eq!(
+            block_on_multi_thread(async { 7 }, "A::run", "A::call").unwrap(),
+            7
+        );
     }
 }

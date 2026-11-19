@@ -18,8 +18,10 @@ use std::time::Duration;
 
 use atomic_agents::error::Error;
 use atomic_agents::mcp::{
-    McpClient, McpTool, McpToolInput, McpToolOutput, McpTransport, McpTransportType,
+    McpClient, McpResource, McpResourceContent, McpResourceOutput, McpTool, McpToolInput,
+    McpToolOutput, McpTransport, McpTransportType,
 };
+use atomic_agents::resource::Resource;
 use atomic_agents::tool::Tool;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -59,6 +61,14 @@ fn scenarios() -> Vec<Scenario> {
         ("tool_trait_over_stdio", || tool_trait_over_stdio().boxed()),
         ("tool_run_on_current_thread_runtime_errors", || {
             tool_run_on_current_thread_runtime_errors().boxed()
+        }),
+        ("resources_over_http", || resources_over_http().boxed()),
+        ("resources_over_stdio", || resources_over_stdio().boxed()),
+        ("resource_templates_method_not_found_tolerated", || {
+            resource_templates_method_not_found_tolerated().boxed()
+        }),
+        ("resource_read_on_current_thread_runtime_errors", || {
+            resource_read_on_current_thread_runtime_errors().boxed()
         }),
     ]
 }
@@ -432,5 +442,136 @@ async fn tool_run_on_current_thread_runtime_errors() {
     })
     .join()
     .expect("run must not panic");
+    client.close().await.expect("close");
+}
+
+type BoxedResource = Box<dyn Resource<Input = McpToolInput, Output = McpResourceOutput>>;
+
+fn find_resource(resources: &[McpResource], uri: &str) -> McpResource {
+    resources
+        .iter()
+        .find(|r| r.definition().uri == uri)
+        .unwrap_or_else(|| panic!("resource {uri} not discovered"))
+        .clone()
+}
+
+/// Discovery, reads (blocking and async), template filling and an unknown URI.
+/// `Resource::read` blocks, so this must run on a multi-thread runtime.
+async fn assert_resources(client: &McpClient) {
+    let resources = client.resources().await.expect("resources");
+    let uris: Vec<&str> = resources
+        .iter()
+        .map(|r| r.definition().uri.as_str())
+        .collect();
+    assert_eq!(uris, ["mem://hello", "mem://blob", "mem://notes/{id}"]);
+    let templates: Vec<bool> = resources
+        .iter()
+        .map(|r| r.definition().is_template)
+        .collect();
+    assert_eq!(templates, [false, false, true]);
+
+    let hello = client.read_resource("mem://hello").await.expect("hello");
+    assert_eq!(hello.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(
+        hello.contents,
+        [McpResourceContent::Text {
+            uri: "mem://hello".into(),
+            mime_type: Some("text/plain".into()),
+            text: "hi".into(),
+        }]
+    );
+    let blob = find_resource(&resources, "mem://blob")
+        .read_async(Map::new())
+        .await
+        .expect("blob");
+    assert_eq!(
+        blob.contents,
+        [McpResourceContent::Blob {
+            uri: "mem://blob".into(),
+            mime_type: Some("application/octet-stream".into()),
+            blob: "AAEC".into(),
+        }]
+    );
+
+    let note = find_resource(&resources, "mem://notes/{id}");
+    assert_eq!(
+        note.uri_for(&args(json!({"id": 42}))).unwrap(),
+        "mem://notes/42"
+    );
+    let boxed: BoxedResource = Box::new(note.clone());
+    assert_eq!(boxed.name(), "note");
+    let out = boxed
+        .read(McpToolInput(args(json!({"id": "42"}))))
+        .expect("read template");
+    assert!(
+        matches!(&out.contents[..], [McpResourceContent::Text { text, .. }] if text == "note 42"),
+        "{out:?}"
+    );
+    assert_err_contains(boxed.read(McpToolInput::default()), "'id'");
+
+    assert!(client.read_resource("mem://nope").await.is_err());
+    let blob_res: BoxedResource = Box::new(find_resource(&resources, "mem://blob"));
+    let again = blob_res
+        .read(McpToolInput::default())
+        .expect("blob via trait");
+    assert_eq!(again, blob);
+}
+
+async fn resources_over_http() {
+    let http = spawn_http(TestServer::default()).await;
+    let client = McpClient::connect(McpTransport::streamable_http(format!("{}/mcp", http.base)))
+        .await
+        .expect("connect http");
+    assert_resources(&client).await;
+    client.close().await.expect("close");
+    http.shutdown().await;
+}
+
+async fn resources_over_stdio() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    assert_resources(&client).await;
+    client.close().await.expect("close");
+}
+
+/// A server without `resources/templates/list` still lists its concrete
+/// resources, with no error.
+async fn resource_templates_method_not_found_tolerated() {
+    let http = spawn_http(TestServer::without_templates()).await;
+    let client = McpClient::connect(McpTransport::streamable_http(format!("{}/mcp", http.base)))
+        .await
+        .expect("connect http");
+    let defs = client.list_resources().await.expect("list_resources");
+    let uris: Vec<&str> = defs.iter().map(|d| d.uri.as_str()).collect();
+    assert_eq!(uris, ["mem://hello", "mem://blob"]);
+    assert!(defs.iter().all(|d| !d.is_template));
+    client.close().await.expect("close");
+    http.shutdown().await;
+}
+
+/// `Resource::read` must return an error, not panic, on a current-thread
+/// runtime and outside any runtime.
+async fn resource_read_on_current_thread_runtime_errors() {
+    let client = McpClient::connect(stdio_transport(STDIO_FLAG))
+        .await
+        .expect("connect stdio");
+    let hello = find_resource(&client.resources().await.expect("resources"), "mem://hello");
+    std::thread::spawn(move || {
+        let boxed: BoxedResource = Box::new(hello);
+        assert_err_contains(boxed.read(McpToolInput::default()), "multi-threaded");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            assert_err_contains(
+                boxed.read(McpToolInput::default()),
+                "McpResource::read_async",
+            );
+        });
+    })
+    .join()
+    .expect("read must not panic");
     client.close().await.expect("close");
 }
