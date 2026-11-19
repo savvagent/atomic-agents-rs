@@ -103,19 +103,11 @@ impl McpDefinitionService {
         method: &'static str,
         key: &'static str,
     ) -> Result<serde_json::Value, crate::error::Error> {
-        collect_pages(key, |cursor| self.list_page(method, cursor)).await
-    }
-
-    async fn list_page(
-        &self,
-        method: &'static str,
-        cursor: Option<String>,
-    ) -> Result<serde_json::Value, crate::error::Error> {
         match self.transport_type {
             McpTransportType::HttpStream | McpTransportType::Sse => {
-                self.list_page_http(method, cursor).await
+                collect_pages(key, |cursor| self.list_page_http(method, cursor)).await
             }
-            McpTransportType::Stdio => self.run_stdio_command(method, cursor).await,
+            McpTransportType::Stdio => self.list_all_stdio(method, key).await,
         }
     }
 
@@ -145,11 +137,14 @@ impl McpDefinitionService {
 
     // --- STDIO transport ---
 
-    async fn run_stdio_command(
+    /// Pages through `method` using a single child process, so continuation
+    /// cursors reach the process that issued them.
+    async fn list_all_stdio(
         &self,
-        method: &str,
-        cursor: Option<String>,
+        method: &'static str,
+        key: &'static str,
     ) -> Result<serde_json::Value, crate::error::Error> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         use tokio::process::Command;
 
         let parts: Vec<&str> = self.endpoint.split_whitespace().collect();
@@ -168,34 +163,61 @@ impl McpDefinitionService {
             cmd.current_dir(dir);
         }
 
-        let request = list_request(method, cursor.as_deref());
-
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::null());
+        cmd.kill_on_drop(true);
 
         let mut child = cmd
             .spawn()
             .map_err(|e| crate::error::Error::Mcp(format!("Failed to spawn process: {e}")))?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err(crate::error::Error::Mcp(
+                "Failed to open STDIO pipes".to_string(),
+            ));
+        };
 
-        if let Some(stdin) = child.stdin.as_mut() {
-            use tokio::io::AsyncWriteExt;
-            let request_str = serde_json::to_string(&request).unwrap();
-            stdin
-                .write_all(request_str.as_bytes())
-                .await
-                .map_err(|e| crate::error::Error::Mcp(format!("Failed to write to stdin: {e}")))?;
-            stdin.shutdown().await.ok();
-        }
+        // (stdin, stdout line reader, next request id)
+        let io = tokio::sync::Mutex::new((stdin, tokio::io::BufReader::new(stdout).lines(), 1u64));
+        let result = collect_pages(key, |cursor| {
+            let io = &io;
+            async move {
+                let mut guard = io.lock().await;
+                let (stdin, lines, next_id) = &mut *guard;
+                let mut request = list_request(method, cursor.as_deref());
+                request["id"] = serde_json::json!(*next_id);
+                *next_id += 1;
+                let mut line = request.to_string();
+                line.push('\n');
+                stdin.write_all(line.as_bytes()).await.map_err(|e| {
+                    crate::error::Error::Mcp(format!("Failed to write to stdin: {e}"))
+                })?;
+                stdin.flush().await.map_err(|e| {
+                    crate::error::Error::Mcp(format!("Failed to write to stdin: {e}"))
+                })?;
+                let response = lines
+                    .next_line()
+                    .await
+                    .map_err(|e| crate::error::Error::Mcp(format!("Process failed: {e}")))?
+                    .ok_or_else(|| {
+                        crate::error::Error::Mcp(
+                            "STDIO process closed stdout before responding".to_string(),
+                        )
+                    })?;
+                serde_json::from_str(&response).map_err(|e| {
+                    crate::error::Error::Mcp(format!("Failed to parse STDIO output: {e}"))
+                })
+            }
+        })
+        .await;
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| crate::error::Error::Mcp(format!("Process failed: {e}")))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        serde_json::from_str(&stdout)
-            .map_err(|e| crate::error::Error::Mcp(format!("Failed to parse STDIO output: {e}")))
+        // Close stdin (EOF) and reap the child.
+        let (stdin, _, _) = io.into_inner();
+        drop(stdin);
+        let status = child.wait().await;
+        let value = result?;
+        status.map_err(|e| crate::error::Error::Mcp(format!("Process failed: {e}")))?;
+        Ok(value)
     }
 }
 
@@ -260,7 +282,10 @@ where
             .and_then(|t| t.as_array())
             .ok_or(McpPaginationError::MissingItems(key))?;
         items.extend(page_items.iter().cloned());
-        match result.and_then(|r| r.get("nextCursor")).and_then(|c| c.as_str()) {
+        match result
+            .and_then(|r| r.get("nextCursor"))
+            .and_then(|c| c.as_str())
+        {
             Some(next) => {
                 if !seen.insert(next.to_string()) {
                     return Err(McpPaginationError::RepeatedCursor(next.to_string()).into());
@@ -273,10 +298,19 @@ where
     Ok(serde_json::json!({"result": {key: items}}))
 }
 
+/// Method paths the module addresses, used to recognise explicit method URLs.
+const KNOWN_METHOD_SUFFIXES: [&str; 4] = [
+    "/mcp/tools/list",
+    "/mcp/tools/call",
+    "/mcp/resources/list",
+    "/mcp/prompts/list",
+];
+
 /// Resolves an HTTP endpoint for `suffix` (e.g. `/mcp/tools/list`).
 ///
-/// An endpoint that already ends with `suffix` is used as-is; otherwise the
-/// suffix is appended to the path. Query parameters and fragments are preserved.
+/// An endpoint that already ends with `suffix` is used as-is. If it ends with a
+/// different known `/mcp/<method>` suffix, that suffix is replaced; otherwise
+/// `suffix` is appended to the path. Query parameters and fragments are preserved.
 pub(crate) fn transport_endpoint(
     endpoint: &str,
     suffix: &str,
@@ -287,7 +321,11 @@ pub(crate) fn transport_endpoint(
     if path.ends_with(suffix.trim_end_matches('/')) {
         return Ok(endpoint.to_string());
     }
-    url.set_path(&format!("{path}{suffix}"));
+    let base = KNOWN_METHOD_SUFFIXES
+        .iter()
+        .find_map(|known| path.strip_suffix(known))
+        .unwrap_or(&path);
+    url.set_path(&format!("{base}{suffix}"));
     Ok(url.to_string())
 }
 
@@ -505,9 +543,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_pages_stops_on_repeated_cursor() {
-        let err = collect_pages("tools", |_| async { Ok(page("tools", &["a"], Some("same"))) })
-            .await
-            .unwrap_err();
+        let err = collect_pages("tools", |_| async {
+            Ok(page("tools", &["a"], Some("same")))
+        })
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("repeated cursor"), "{err}");
     }
 
@@ -542,6 +582,61 @@ mod tests {
     }
 
     #[test]
+    fn test_transport_endpoint_replaces_other_method_suffix() {
+        let call = "/mcp/tools/call";
+        let list = "/mcp/tools/list";
+        assert_eq!(
+            transport_endpoint("https://host/api/mcp/tools/list", call).unwrap(),
+            "https://host/api/mcp/tools/call"
+        );
+        assert_eq!(
+            transport_endpoint("https://host/api/mcp/tools/call", list).unwrap(),
+            "https://host/api/mcp/tools/list"
+        );
+        assert_eq!(
+            transport_endpoint("https://host/api/mcp/tools/list?t=a%2Fb#f", call).unwrap(),
+            "https://host/api/mcp/tools/call?t=a%2Fb#f"
+        );
+        assert_eq!(
+            transport_endpoint("https://host/api/mcp/resources/list", "/mcp/prompts/list").unwrap(),
+            "https://host/api/mcp/prompts/list"
+        );
+        assert_eq!(
+            transport_endpoint("https://host/api", call).unwrap(),
+            "https://host/api/mcp/tools/call"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_stdio_pagination_uses_single_process() {
+        let script = r#"issued=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"cursor":"c1"'*)
+      if [ "$issued" = 1 ]; then
+        echo '{"result":{"tools":[{"name":"b"}]}}'
+      else
+        echo '{"error":{"message":"unknown cursor"}}'
+      fi;;
+    *)
+      issued=1
+      echo '{"result":{"tools":[{"name":"a"}],"nextCursor":"c1"}}';;
+  esac
+done
+"#;
+        let path =
+            std::env::temp_dir().join(format!("mcp_stdio_fixture_{}.sh", std::process::id()));
+        std::fs::write(&path, script).unwrap();
+        let svc =
+            McpDefinitionService::new(format!("sh {}", path.display()), McpTransportType::Stdio);
+        let result = svc.fetch_tool_definitions().await;
+        let _ = std::fs::remove_file(&path);
+        let names: Vec<String> = result.unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
     fn test_transport_endpoint() {
         let s = "/mcp/tools/list";
         assert_eq!(
@@ -557,8 +652,7 @@ mod tests {
             "https://example.com/api/mcp/tools/list"
         );
         assert_eq!(
-            transport_endpoint("https://example.com/api/mcp/tools/list/?token=a%2Fb#s", s)
-                .unwrap(),
+            transport_endpoint("https://example.com/api/mcp/tools/list/?token=a%2Fb#s", s).unwrap(),
             "https://example.com/api/mcp/tools/list/?token=a%2Fb#s"
         );
         assert_eq!(
@@ -589,7 +683,10 @@ mod tests {
         for schema in schemas {
             let body =
                 serde_json::json!({"result": {"tools": [{"name": "t", "inputSchema": schema}]}});
-            assert_eq!(parse_tool_definitions(&body).unwrap()[0].input_schema, schema);
+            assert_eq!(
+                parse_tool_definitions(&body).unwrap()[0].input_schema,
+                schema
+            );
         }
     }
 }
