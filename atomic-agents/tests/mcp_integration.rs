@@ -61,7 +61,32 @@ fn main() {
         serve_stdio(TestServer::tools_only());
     }
 
-    let filter = args.iter().find(|a| !a.starts_with('-')).cloned();
+    // Libtest-style flags: `--flag value` pairs are skipped as a unit.
+    let mut filter = None;
+    let mut list = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--list" => list = true,
+            "--test-threads" | "--skip" | "--format" | "--color" => {
+                it.next();
+            }
+            _ if a.starts_with('-') => {}
+            _ => filter = filter.or_else(|| Some(a.clone())),
+        }
+    }
+    if list {
+        for (name, _) in scenarios() {
+            println!("{name}: test");
+        }
+        std::process::exit(0);
+    }
+    if let Some(f) = &filter
+        && !scenarios().iter().any(|(n, _)| n.contains(f.as_str()))
+    {
+        eprintln!("filter {f:?} matched no scenarios");
+        std::process::exit(1);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -266,6 +291,7 @@ async fn repeated_cursor_errors() {
         .await
         .expect("connect http");
     assert_err_contains(client.list_tools().await, "repeated cursor");
+    assert_err_contains(client.list_tools().await, "tools/list");
     client.close().await.expect("close");
     http.shutdown().await;
 }

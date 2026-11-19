@@ -65,7 +65,7 @@ impl McpResourceDefinition {
     /// A resource template from `resources/templates/list`.
     ///
     /// Every template variable becomes a string property. Simple, `{+..}`,
-    /// `{#..}` and path-style (`{.. }`, `{/..}`, `{;..}`) variables are
+    /// `{#..}` and path-style (`{.x}`, `{/..}`, `{;..}`) variables are
     /// required; form-style query variables (`{?..}`, `{&..}`) are optional.
     pub fn from_template(template: ResourceTemplate) -> Self {
         let mut properties = Map::new();

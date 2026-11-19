@@ -18,6 +18,9 @@ use super::result::extract_tool_result;
 use super::transport::{McpTransport, McpTransportType, connect_transport};
 use crate::error::{Error, Result};
 
+/// How long [`McpClient::close`] waits for the session to shut down.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One initialised MCP session.
 ///
 /// Connecting performs the `initialize` handshake once; every later request
@@ -173,13 +176,14 @@ impl McpClient {
     pub async fn close(&self) -> Result<()> {
         self.inner.closed.store(true, Ordering::SeqCst);
         let service = self.inner.service.lock().await.take();
-        if let Some(mut service) = service {
-            service
-                .close()
-                .await
-                .map_err(|e| Error::Mcp(format!("failed to close MCP session: {e}")))?;
+        let Some(mut service) = service else {
+            return Ok(());
+        };
+        match service.close_with_timeout(CLOSE_TIMEOUT).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(Error::Mcp("timed out closing MCP session".to_string())),
+            Err(e) => Err(Error::Mcp(format!("failed to close MCP session: {e}"))),
         }
-        Ok(())
     }
 }
 
@@ -244,7 +248,10 @@ where
         match next {
             Some(next) => {
                 if !seen.insert(next.clone()) {
-                    return Err(McpPaginationError::RepeatedCursor(next).into());
+                    return Err(Error::Mcp(format!(
+                        "{method} failed: {}",
+                        McpPaginationError::RepeatedCursor(next)
+                    )));
                 }
                 cursor = Some(next);
             }
@@ -299,8 +306,11 @@ mod tests {
             Ok((vec![2], Some("c1".into()))),
         ]);
         let err = collect_pages("x/list", fetch).await.unwrap_err();
-        let expected: Error = McpPaginationError::RepeatedCursor("c1".into()).into();
-        assert_eq!(err.to_string(), expected.to_string());
+        let inner = McpPaginationError::RepeatedCursor("c1".into());
+        assert!(
+            err.to_string().contains(&format!("x/list failed: {inner}")),
+            "{err}"
+        );
         assert!(err.to_string().contains("repeated cursor"), "{err}");
     }
 

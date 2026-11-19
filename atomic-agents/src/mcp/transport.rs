@@ -29,7 +29,7 @@ pub enum McpTransportType {
 /// URLs in the HTTP variants are used verbatim; use
 /// [`McpTransport::from_endpoint`] for upstream-compatible `/mcp` / `/sse`
 /// suffix resolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum McpTransport {
     /// Spawn `command` and speak MCP over its stdin/stdout. The child's
     /// stderr is discarded so it cannot clutter the host terminal.
@@ -151,9 +151,60 @@ impl McpTransport {
     fn kind_label(&self) -> String {
         match self {
             Self::Stdio { command, .. } => format!("stdio '{command}'"),
-            Self::StreamableHttp { url, .. } => format!("streamable HTTP {url}"),
-            Self::Sse { url, .. } => format!("SSE {url}"),
+            Self::StreamableHttp { url, .. } => format!("streamable HTTP {}", redact_url(url)),
+            Self::Sse { url, .. } => format!("SSE {}", redact_url(url)),
         }
+    }
+}
+
+/// Formats the transport for diagnostics. URLs are redacted with
+/// [`redact_url`], and header and environment values are omitted, because
+/// all of them commonly carry credentials.
+impl std::fmt::Debug for McpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = |pairs: &[(String, String)]| -> Vec<String> {
+            pairs.iter().map(|(k, _)| k.clone()).collect()
+        };
+        match self {
+            Self::Stdio {
+                command,
+                args,
+                cwd,
+                env,
+            } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", args)
+                .field("cwd", cwd)
+                .field("env_names", &names(env))
+                .finish(),
+            Self::StreamableHttp { url, headers } => f
+                .debug_struct("StreamableHttp")
+                .field("url", &redact_url(url))
+                .field("header_names", &names(headers))
+                .finish(),
+            Self::Sse { url, headers } => f
+                .debug_struct("Sse")
+                .field("url", &redact_url(url))
+                .field("header_names", &names(headers))
+                .finish(),
+        }
+    }
+}
+
+/// Strips everything from `url` that may carry credentials (userinfo, query
+/// string, fragment) so it can appear in errors and logs. Falls back to
+/// `"<invalid url>"` when it does not parse.
+pub(crate) fn redact_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
+        }
+        Err(_) => "<invalid url>".to_string(),
     }
 }
 
@@ -162,8 +213,14 @@ impl McpTransport {
 /// Mirrors upstream `_transport_endpoint`: trailing slashes are ignored when
 /// comparing, and the query string and fragment are kept.
 pub(crate) fn resolve_endpoint(endpoint: &str, suffix: &str) -> Result<String> {
-    let mut url = url::Url::parse(endpoint)
-        .map_err(|e| Error::Mcp(format!("Invalid endpoint URL: {endpoint:?}: {e}")))?;
+    let mut url =
+        url::Url::parse(endpoint).map_err(|e| Error::Mcp(format!("Invalid endpoint URL: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(Error::Mcp(format!(
+            "Invalid endpoint URL: unsupported scheme '{}'",
+            url.scheme()
+        )));
+    }
     let path = url.path().trim_end_matches('/').to_string();
     if path.ends_with(suffix) {
         return Ok(endpoint.to_string());
@@ -310,6 +367,30 @@ mod tests {
     fn resolve_rejects_invalid_url() {
         let err = resolve_endpoint("not a url", "/mcp").unwrap_err();
         assert!(err.to_string().contains("Invalid endpoint URL"), "{err}");
+    }
+
+    #[test]
+    fn resolve_rejects_non_http_schemes() {
+        // `localhost:8080` parses as scheme `localhost`.
+        for bad in ["localhost:8080", "ftp://h/x"] {
+            let err = resolve_endpoint(bad, "/mcp").unwrap_err().to_string();
+            assert!(err.contains("unsupported scheme"), "{bad}: {err}");
+        }
+        assert!(resolve_endpoint("https://h/x", "/mcp").is_ok());
+    }
+
+    #[test]
+    fn labels_and_debug_redact_credentials() {
+        let raw = "http://user:pw@h:1/mcp?token=secret#f";
+        let t = McpTransport::streamable_http(raw).with_header("Authorization", "Bearer hdr");
+        for text in [t.kind_label(), format!("{t:?}")] {
+            assert!(text.contains("h:1/mcp"), "{text}");
+            for leaked in ["secret", "pw", "user", "hdr"] {
+                assert!(!text.contains(leaked), "{leaked} leaked in {text}");
+            }
+        }
+        assert!(McpTransport::sse(raw).kind_label().contains("h:1/mcp"));
+        assert_eq!(redact_url("not a url"), "<invalid url>");
     }
 
     #[test]
