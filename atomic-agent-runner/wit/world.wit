@@ -1,7 +1,9 @@
 package atomic-agents:runner@0.1.0;
 
 /// Data shared by the runner's imports and its export. Each type mirrors one
-/// in `atomic_agents::guest` field for field.
+/// in `atomic_agents::guest` field for field, except `level`
+/// (`atomic_agent_runner::host::Level`) and `run-error` / `step-failure`
+/// (`atomic_agent_runner::interpreter::RunError`).
 interface types {
   /// Who wrote a message. System text travels in `completion-request.system`.
   enum role {

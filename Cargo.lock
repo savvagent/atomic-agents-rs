@@ -193,7 +193,6 @@ dependencies = [
 name = "atomic-agent-runner-host-tests"
 version = "0.2.1"
 dependencies = [
- "anyhow",
  "serde_json",
  "wasmtime",
  "wasmtime-wasi",

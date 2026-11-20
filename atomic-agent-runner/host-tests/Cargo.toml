@@ -11,4 +11,3 @@ publish = false
 wasmtime = { version = "51", features = ["component-model"] }
 wasmtime-wasi = "51"
 serde_json.workspace = true
-anyhow = "1"

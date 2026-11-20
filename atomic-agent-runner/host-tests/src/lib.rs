@@ -75,11 +75,16 @@ fn build_wasm(args: &[&str], file: &str) -> PathBuf {
         .args(["--release", "--target", "wasm32-wasip2", "--target-dir"])
         .arg(&target_dir)
         .output()
-        .expect("cargo runs");
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not run {:?}: {e}",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+            )
+        });
     assert!(
         out.status.success(),
-        "building {file} for wasm32-wasip2 failed. Install the target with \
-         `rustup target add wasm32-wasip2` (for the runner, setting {WASM_ENV} \
+        "building {file} for wasm32-wasip2 failed. If the target is missing, install \
+         it with `rustup target add wasm32-wasip2` (for the runner, setting {WASM_ENV} \
          to a built component skips this build).\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -351,13 +356,26 @@ pub fn run(spec: &str, event: &str, script: Script) -> (Result<String, RunError>
 ///
 /// If the fixture fails to build, link or instantiate, or traps.
 pub fn probe_sandbox() -> Value {
+    probe_with(sandbox_wasi_ctx())
+}
+
+/// Instantiates the `env-probe` fixture with `wasi` instead of the sandbox.
+/// Used as the positive control: it shows the probe does report what a
+/// context exposes, so an empty report from the sandbox means something.
+///
+/// # Panics
+///
+/// As [`probe_sandbox`].
+pub fn probe_with(wasi: WasiCtx) -> Value {
     let component =
         Component::from_file(engine(), env_probe_path()).expect("env-probe component loads");
     let mut linker = Linker::new(engine());
     // The fixture reads the filesystem on purpose, so it gets every WASI
     // interface; the sandbox is the context, not the linker.
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("WASI links");
-    let mut store = Store::new(engine(), TestHost::new(Script::default()));
+    let mut host = TestHost::new(Script::default());
+    host.wasi = wasi;
+    let mut store = Store::new(engine(), host);
     let probe =
         EnvProbe::instantiate(&mut store, &component, &linker).expect("env-probe instantiates");
     let out = probe.call_probe(&mut store).expect("probe does not trap");
