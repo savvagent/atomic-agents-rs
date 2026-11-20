@@ -121,10 +121,15 @@ interface types {
   /// example, a host refuses a write tool unless the origin is `act-step` and
   /// an act step of the deployed spec names that tool. A host should also
   /// apply its own argument checks, because act arguments can be rendered
-  /// from earlier model output.
+  /// from earlier model output. A `tool-step` call is not an act: apply
+  /// read-only policy to it.
+  ///
+  /// The origin is trusted only as far as the guest component is. A host
+  /// that loads a component it did not build (or whose digest it did not
+  /// pin) must treat the origin as unverified.
   enum call-origin {
     /// A tool call the model asked for in an `agent` step. Every call the
-    /// model makes has this origin, whatever tool it names and whatever its
+    /// model makes that reaches the host has this origin, whatever tool it names and whatever its
     /// arguments say.
     model,
     /// A `tool` step's own call.
