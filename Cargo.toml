@@ -7,7 +7,11 @@ members = [
     "atomic-forge",
     "atomic-studio-runner",
     "atomic-agent-runner",
+    "atomic-agent-runner/host-tests",
 ]
+# A fixture guest built by the host tests for wasm32-wasip2; not a member so
+# `cargo build --workspace` never compiles it natively.
+exclude = ["atomic-agent-runner/host-tests/env-probe"]
 
 [workspace.package]
 version = "0.2.1"

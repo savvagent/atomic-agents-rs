@@ -1,0 +1,6 @@
+package test:env-probe@0.1.0;
+
+/// Reports what the guest can see of its environment, as JSON.
+world env-probe {
+  export probe: func() -> string;
+}

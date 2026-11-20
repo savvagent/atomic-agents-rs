@@ -1,0 +1,196 @@
+package atomic-agents:runner@0.1.0;
+
+/// Data shared by the runner's imports and its export. Each type mirrors one
+/// in `atomic_agents::guest` field for field.
+interface types {
+  /// Who wrote a message. System text travels in `completion-request.system`.
+  enum role {
+    user,
+    assistant,
+  }
+
+  /// A model's request to run a tool.
+  record tool-call {
+    /// Pairs this call with its `tool-result`.
+    id: string,
+    name: string,
+    /// Arguments, as a JSON document.
+    arguments: string,
+  }
+
+  /// The outcome of a `tool-call`.
+  record tool-result {
+    call-id: string,
+    content: string,
+    /// Whether the tool failed and `content` describes the failure.
+    is-error: bool,
+  }
+
+  /// One piece of a message.
+  variant content-block {
+    text(string),
+    tool-call(tool-call),
+    tool-result(tool-result),
+  }
+
+  /// A conversation turn.
+  record message {
+    role: role,
+    content: list<content-block>,
+  }
+
+  /// A tool the model may call.
+  record tool-spec {
+    name: string,
+    description: string,
+    /// JSON Schema of the arguments, as a JSON document.
+    input-schema: string,
+  }
+
+  /// A request for one completion. No field selects or forces a tool: the
+  /// host decides how to obtain output matching `output-schema`.
+  record completion-request {
+    model: string,
+    system: option<string>,
+    messages: list<message>,
+    tools: list<tool-spec>,
+    /// JSON Schema the reply must follow, as a JSON document.
+    output-schema: option<string>,
+    max-tokens: option<u32>,
+    /// Further sampling parameters, as a JSON object document.
+    params: option<string>,
+  }
+
+  /// Token counts for one completion.
+  record usage {
+    input-tokens: u32,
+    output-tokens: u32,
+  }
+
+  /// The host's reply to a `completion-request`.
+  record completion {
+    /// Generated text; with an `output-schema`, the JSON reply.
+    text: option<string>,
+    tool-calls: list<tool-call>,
+    stop-reason: string,
+    usage: option<usage>,
+  }
+
+  /// Why the host could not complete a request.
+  variant llm-error {
+    refused(string),
+    limit-exceeded(string),
+    invalid-request(string),
+    unavailable(string),
+  }
+
+  /// A tool the host exposes to this run.
+  record tool-info {
+    /// Name, as passed to `mcp.call`.
+    name: string,
+    description: string,
+    /// JSON Schema of the arguments, as a JSON document.
+    input-schema: string,
+  }
+
+  /// Why a tool call or listing failed.
+  variant tool-error {
+    denied(string),
+    not-found(string),
+    invalid-arguments(string),
+    failed(string),
+    limit-exceeded(string),
+  }
+
+  /// Severity of a log line.
+  enum level {
+    trace,
+    debug,
+    info,
+    warn,
+    error,
+  }
+
+  /// Which step failed, and why.
+  record step-failure {
+    step: string,
+    message: string,
+  }
+
+  /// Why a run stopped. Nothing after the failure ran, and no state was
+  /// written.
+  variant run-error {
+    /// The spec did not parse or failed validation.
+    invalid-spec(string),
+    /// The event did not parse.
+    invalid-event(string),
+    /// A run limit was reached.
+    limit-exceeded(string),
+    /// The host's model failed.
+    llm(llm-error),
+    /// A host tool failed in a `tool` or `act` step, or hit a host limit.
+    tool(tool-error),
+    /// A step could not complete.
+    step-failed(step-failure),
+  }
+}
+
+/// The model.
+interface llm {
+  use types.{completion-request, completion, llm-error};
+
+  /// Runs one completion.
+  complete: func(req: completion-request) -> result<completion, llm-error>;
+}
+
+/// The tools.
+interface mcp {
+  use types.{tool-info, tool-error};
+
+  /// Calls `tool` with `args`, a JSON document, and returns its output.
+  call: func(tool: string, args: string) -> result<string, tool-error>;
+
+  /// Lists the tools the host chooses to expose to this run, and only
+  /// those: the guest offers the model nothing else.
+  list-tools: func() -> result<list<tool-info>, tool-error>;
+}
+
+/// A string key-value store that persists between runs.
+interface state {
+  /// Reads a value written by an earlier run, if any.
+  get: func(key: string) -> option<string>;
+  /// Writes a value for later runs; called only after a run succeeds.
+  set: func(key: string, value: string);
+}
+
+/// The log sink.
+interface log {
+  use types.{level};
+
+  /// Emits one log line.
+  emit: func(level: level, msg: string);
+}
+
+/// The clock.
+interface clock {
+  /// Milliseconds since the Unix epoch.
+  now: func() -> u64;
+}
+
+/// A pipeline runner. `run` executes the pipeline spec (JSON) on the event
+/// (JSON) and returns the outcome as JSON. Everything outside the guest is
+/// reached through these imports.
+///
+/// Hosts are expected to give the guest an empty environment, no args, no
+/// preopened directories and no inherited stdio.
+world runner {
+  import llm;
+  import mcp;
+  import state;
+  import log;
+  import clock;
+
+  use types.{run-error};
+
+  export run: func(spec: string, event: string) -> result<string, run-error>;
+}
