@@ -216,9 +216,9 @@ Without `native` and without a provider feature, `AtomicAgent::run` drives the f
 
 ### The `atomic-agent-runner` component
 
-`atomic-agent-runner/` is a pipeline interpreter packaged as a WebAssembly component (not published to crates.io; it is released as a component). It runs a studio pipeline spec (JSON) against an event (JSON) and returns the outcome as JSON. Its WIT package is `atomic-agents:runner@0.1.0`, world `runner` (`atomic-agent-runner/wit/world.wit`):
+`atomic-agent-runner/` is a pipeline interpreter packaged as a WebAssembly component (not published to crates.io; it is released as a component). It runs a studio pipeline spec (JSON) against an event (JSON) and returns the outcome as JSON. Its WIT package is `atomic-agents:runner@0.2.0`, world `runner` (`atomic-agent-runner/wit/world.wit`):
 
-- imports: `llm` (`complete`), `mcp` (`call`, `list-tools`), `state` (`get`, `set`), `log` and `clock`;
+- imports: `llm` (`complete`), `mcp` (`call(tool, args, origin)`, `list-tools`), `state` (`get`, `set`), `log` and `clock`;
 - export: `run(spec, event)`.
 
 Steps are `agent`, `tool`, `act` and `foreach` (at most 100 items, no nesting). Conditions are expressions or the studio's structured form. `act` arguments must be a literal object in the spec. An agent step's `system_prompt` is a literal (no templates); its rendered `input` reaches the model XML-escaped inside `<untrusted-input>`, tool output (cut to 64 KiB) inside `<untrusted-tool-output>`, and the system text ends by saying wrapped text is data. Agent `params` may set only `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and `effort` (so a spec cannot choose a tool, the output format, the model, the system text or the messages), a rendered agent `input` is at most 1 MiB, an agent step may not name a tool that an act step uses, and output schemas cannot retrieve external `$ref`s. Limits: `max_turns` defaults to 8 (at most 32), `max_retries` defaults to 2 (at most 5), a run is capped at 500 tool calls (every call the model makes counts) and 200 LLM calls, and the spec and event are each at most 1 MiB. `state` writes are committed only when the run succeeds.
@@ -239,6 +239,7 @@ The guest reaches the outside world only through the world's imports. A host is 
 - an empty environment, no arguments, no preopened directories and no inherited stdio;
 - no network access: model calls go through `llm.complete` and tool calls through `mcp.call`;
 - from `mcp.list-tools`, only read tools: the guest offers the model nothing else, and never a tool an `act` step uses, but it cannot tell which other tools write;
+- a check of the `origin` on every `mcp.call`. The runner's own interpreter sets it from the kind of step making the call (`model`, `tool-step` or `act-step`); it is never taken from model output or from `args`, and a call the model asks for is always `model`, whatever tool it names. `act-step` means "some act step of this spec named this tool"; it carries no step id. Treat the origin as one check among several, not proof: for example, refuse a write tool unless the origin is `act-step` and an act step of the deployed spec names that tool, and still apply your own argument checks, because act arguments can be rendered from earlier model output;
 - a `state` store scoped per pipeline and per tenant (keys come from the spec and are not namespaced by the guest);
 - a memory limit and fuel or epoch interruption for each run;
 - no honouring of tool-forcing keys (`tool_choice`, `toolConfig`, `response_format`, ...) in `completion-request.params`; the runner rejects them, but a host should not rely on that.

@@ -1,7 +1,8 @@
 //! Component glue: the [`Host`] over the world's imports, and the `run`
 //! export over [`interpreter::run`].
 //!
-//! The WIT types mirror `atomic_agents::guest` one to one, so everything here
+//! The WIT types mirror `atomic_agents::guest` (and the runner's own
+//! [`Level`], [`CallOrigin`] and [`RunError`]) one to one, so everything here
 //! is field-by-field conversion.
 
 use ::atomic_agents::guest as g;
@@ -35,9 +36,8 @@ impl Host for WitHost {
             .map_err(Into::into)
     }
 
-    // The 0.1.0 world's `call` has no origin parameter yet.
-    fn call(&self, tool: &str, args: &str, _origin: CallOrigin) -> Result<String, g::ToolError> {
-        mcp::call(tool, args).map_err(Into::into)
+    fn call(&self, tool: &str, args: &str, origin: CallOrigin) -> Result<String, g::ToolError> {
+        mcp::call(tool, args, origin.into()).map_err(Into::into)
     }
 
     fn state_get(&self, key: &str) -> Option<String> {
@@ -234,6 +234,16 @@ impl From<Level> for w::Level {
             Level::Info => Self::Info,
             Level::Warn => Self::Warn,
             Level::Error => Self::Error,
+        }
+    }
+}
+
+impl From<CallOrigin> for w::CallOrigin {
+    fn from(o: CallOrigin) -> Self {
+        match o {
+            CallOrigin::Model => Self::Model,
+            CallOrigin::ToolStep => Self::ToolStep,
+            CallOrigin::ActStep => Self::ActStep,
         }
     }
 }

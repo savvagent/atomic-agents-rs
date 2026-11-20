@@ -40,8 +40,8 @@ mod bindings {
 
 use bindings::Runner;
 pub use bindings::atomic_agents::runner::types::{
-    Completion, CompletionRequest, ContentBlock, Level, LlmError, Message, Role, RunError,
-    StepFailure, ToolCall, ToolError, ToolInfo, ToolResult, ToolSpec, Usage,
+    CallOrigin, Completion, CompletionRequest, ContentBlock, Level, LlmError, Message, Role,
+    RunError, StepFailure, ToolCall, ToolError, ToolInfo, ToolResult, ToolSpec, Usage,
 };
 use bindings::atomic_agents::runner::{clock, llm, log, mcp, state, types};
 use bindings::probe::EnvProbe;
@@ -243,8 +243,9 @@ pub struct TestHost {
     script: Script,
     /// Every completion request, in order.
     pub requests: Vec<CompletionRequest>,
-    /// Every `mcp.call`, with arguments parsed as JSON (a string if not JSON).
-    pub calls: Vec<(String, Value)>,
+    /// Every `mcp.call`, with arguments parsed as JSON (a string if not
+    /// JSON) and the origin the guest passed.
+    pub calls: Vec<(String, Value, CallOrigin)>,
     /// State after the run.
     pub state: HashMap<String, String>,
     /// Every `log.emit`.
@@ -290,7 +291,12 @@ impl llm::Host for TestHost {
 }
 
 impl mcp::Host for TestHost {
-    fn call(&mut self, tool: String, args: String) -> Result<String, ToolError> {
+    fn call(
+        &mut self,
+        tool: String,
+        args: String,
+        origin: CallOrigin,
+    ) -> Result<String, ToolError> {
         let parsed = serde_json::from_str(&args).unwrap_or(Value::String(args));
         let result = self
             .script
@@ -298,7 +304,7 @@ impl mcp::Host for TestHost {
             .get_mut(&tool)
             .and_then(VecDeque::pop_front)
             .unwrap_or_else(|| Ok(serde_json::json!({ "done": tool }).to_string()));
-        self.calls.push((tool, parsed));
+        self.calls.push((tool, parsed, origin));
         result
     }
 
