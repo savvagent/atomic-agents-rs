@@ -6,7 +6,7 @@
 
 use ::atomic_agents::guest as g;
 
-use crate::host::{Host, Level};
+use crate::host::{CallOrigin, Host, Level};
 use crate::interpreter::{self, RunError};
 
 mod bindings {
@@ -28,19 +28,18 @@ impl g::LlmHost for WitHost {
     }
 }
 
-impl g::McpHost for WitHost {
-    fn call(&self, tool: &str, args: &str) -> Result<String, g::ToolError> {
-        mcp::call(tool, args).map_err(Into::into)
-    }
-
+impl Host for WitHost {
     fn list_tools(&self) -> Result<Vec<g::ToolInfo>, g::ToolError> {
         mcp::list_tools()
             .map(|tools| tools.into_iter().map(Into::into).collect())
             .map_err(Into::into)
     }
-}
 
-impl Host for WitHost {
+    // The 0.1.0 world's `call` has no origin parameter yet.
+    fn call(&self, tool: &str, args: &str, _origin: CallOrigin) -> Result<String, g::ToolError> {
+        mcp::call(tool, args).map_err(Into::into)
+    }
+
     fn state_get(&self, key: &str) -> Option<String> {
         state::get(key)
     }

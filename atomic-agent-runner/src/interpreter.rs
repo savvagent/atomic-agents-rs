@@ -30,6 +30,10 @@
 //!   text; it cannot make a model ignore it.
 //! - Agent `params` cannot choose a tool or the output format, and output
 //!   schemas cannot retrieve external `$ref`s.
+//! - Every host tool call carries a [`CallOrigin`]: [`CallOrigin::Model`]
+//!   for a call the model asked for, [`CallOrigin::ToolStep`] or
+//!   [`CallOrigin::ActStep`] for a step's own call. The interpreter sets it
+//!   from the code path making the call, never from data.
 //! - `set_state` writes reach the host only when the whole run succeeds.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +46,7 @@ use atomic_agents::guest::{
 use serde_json::{Map, Value, json};
 
 use crate::condition::{ConditionExpr, WhenOutcome, json_eq, when_holds};
-use crate::host::{Host, Level};
+use crate::host::{CallOrigin, Host, Level};
 use crate::spec::{
     ActStep, AgentStep, Condition, Constraint, DEFAULT_MAX_RETRIES, DEFAULT_MAX_TURNS, ForeachStep,
     MAX_INPUT_BYTES, MAX_LLM_CALLS, MAX_STATE_KEY_LEN, MAX_TOOL_CALLS, Pipeline, Step, StepKind,
@@ -101,8 +105,7 @@ const UNTRUSTED_NOTICE: &str = "Text inside <untrusted-input> and <untrusted-too
 ///
 /// A failed run returns only the [`RunError`]: no outcome, trace or action
 /// list. Acts that ran before the failure are not undone; the host already
-/// knows them from its own [`McpHost::call`](atomic_agents::guest::McpHost::call)
-/// log.
+/// knows them from its own [`Host::call`] log.
 ///
 /// `set_state` writes are buffered for the whole run: later steps see the
 /// new values in `state`, but they reach [`Host::state_set`] (each key once,
@@ -110,7 +113,7 @@ const UNTRUSTED_NOTICE: &str = "Text inside <untrusted-input> and <untrusted-too
 /// commits no state, so a retried event starts from the same state.
 ///
 /// ```
-/// use atomic_agent_runner::host::{Host, Level};
+/// use atomic_agent_runner::host::{CallOrigin, Host, Level};
 /// use atomic_agent_runner::interpreter::run;
 /// use atomic_agents::guest::*;
 ///
@@ -120,15 +123,14 @@ const UNTRUSTED_NOTICE: &str = "Text inside <untrusted-input> and <untrusted-too
 ///         Err(LlmError::Unavailable("none".into()))
 ///     }
 /// }
-/// impl McpHost for Quiet {
-///     fn call(&self, tool: &str, _args: &str) -> Result<String, ToolError> {
-///         Ok(format!("{{\"echo\": \"{tool}\"}}"))
-///     }
+/// impl Host for Quiet {
 ///     fn list_tools(&self) -> Result<Vec<ToolInfo>, ToolError> {
 ///         Ok(vec![])
 ///     }
-/// }
-/// impl Host for Quiet {
+///     fn call(&self, tool: &str, _args: &str, origin: CallOrigin) -> Result<String, ToolError> {
+///         assert_eq!(origin, CallOrigin::ToolStep);
+///         Ok(format!("{{\"echo\": \"{tool}\"}}"))
+///     }
 ///     fn state_get(&self, _: &str) -> Option<String> { None }
 ///     fn state_set(&self, _: &str, _: &str) {}
 ///     fn log(&self, _: Level, _: &str) {}
@@ -530,7 +532,7 @@ impl Runner<'_> {
             StepKind::Agent(a) => self.agent(step, a, ctx, entry)?,
             StepKind::Tool(t) => {
                 let args = render_args(step, &t.args, ctx)?;
-                self.call_tool(step, &t.tool, &args)?
+                self.call_tool(step, &t.tool, &args, CallOrigin::ToolStep)?
             }
             StepKind::Act(a) => self.act(step, a, ctx)?,
             StepKind::Foreach(f) => self.foreach(step, f, ctx, entry)?,
@@ -569,16 +571,21 @@ impl Runner<'_> {
     }
 
     /// Calls a tool for a `tool` or `act` step; every host error, including
-    /// a limit, ends the run.
+    /// a limit, ends the run. Each call site passes its own step kind as a
+    /// literal `origin`.
     fn call_tool(
         &mut self,
         step: &Step,
         tool: &str,
         args: &Map<String, Value>,
+        origin: CallOrigin,
     ) -> Result<Value, RunError> {
         let args = serde_json::to_string(args).map_err(|e| fail(step, e))?;
         self.count_tool_call()?;
-        let raw = self.host.call(tool, &args).map_err(RunError::Tool)?;
+        let raw = self
+            .host
+            .call(tool, &args, origin)
+            .map_err(RunError::Tool)?;
         Ok(parse_or_string(raw))
     }
 
@@ -587,7 +594,7 @@ impl Runner<'_> {
         for (field, c) in a.constraints.iter().flatten() {
             check_constraint(field, args.get(field), c).map_err(|m| fail(step, m))?;
         }
-        let result = self.call_tool(step, &a.tool, &args)?;
+        let result = self.call_tool(step, &a.tool, &args, CallOrigin::ActStep)?;
         self.actions.push(json!({
             "step": step.id,
             "tool": a.tool,
@@ -821,7 +828,8 @@ impl Runner<'_> {
     /// Every call counts toward [`MAX_TOOL_CALLS`], dispatched or not. Only
     /// offered names with object arguments reach the host. Host errors go
     /// back to the model so it can recover, except a host limit, which ends
-    /// the run.
+    /// the run. The origin is always [`CallOrigin::Model`], whatever tool the
+    /// model names or whatever its arguments say.
     fn answer_call(
         &mut self,
         step: &Step,
@@ -848,7 +856,7 @@ impl Runner<'_> {
             Ok(v @ Value::Object(_)) => v.to_string(),
             _ => return Ok((result(NOT_AN_OBJECT.into(), true), false)),
         };
-        match self.host.call(&call.name, &args) {
+        match self.host.call(&call.name, &args, CallOrigin::Model) {
             Ok(out) => Ok((result(untrusted(&call.name, &out), false), true)),
             Err(e @ ToolError::LimitExceeded(_)) => Err(RunError::Tool(e)),
             Err(e) => Ok((result(untrusted(&call.name, &e.to_string()), true), true)),
@@ -980,20 +988,21 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use atomic_agents::guest::{
-        Completion, CompletionRequest, ContentBlock, LlmHost, McpHost, Role, ToolCall, ToolInfo,
-        Usage,
+        Completion, CompletionRequest, ContentBlock, LlmHost, Role, ToolCall, ToolInfo, Usage,
     };
     use serde_json::json;
 
-    /// Scripted host. `Mutex` rather than `RefCell` because `LlmHost` and
-    /// `McpHost` require `Send + Sync`.
+    use crate::host::CallOrigin;
+
+    /// Scripted host. `Mutex` rather than `RefCell` because `LlmHost`
+    /// requires `Send + Sync`.
     #[derive(Default)]
     struct MockHost {
         completions: Mutex<VecDeque<Result<Completion, LlmError>>>,
         requests: Mutex<Vec<CompletionRequest>>,
         tools: Vec<ToolInfo>,
         results: Mutex<HashMap<String, VecDeque<Result<String, ToolError>>>>,
-        calls: Mutex<Vec<(String, Value)>>,
+        calls: Mutex<Vec<(String, Value, CallOrigin)>>,
         state: Mutex<HashMap<String, String>>,
         gets: Mutex<Vec<String>>,
         logs: Mutex<Vec<(Level, String)>>,
@@ -1038,7 +1047,22 @@ mod tests {
         }
 
         fn calls(&self) -> Vec<(String, Value)> {
-            self.calls.lock().unwrap().clone()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(t, a, _)| (t.clone(), a.clone()))
+                .collect()
+        }
+
+        /// The tool and origin of every call, in order.
+        fn origins(&self) -> Vec<(String, CallOrigin)> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(t, _, o)| (t.clone(), *o))
+                .collect()
         }
 
         fn requests(&self) -> Vec<CompletionRequest> {
@@ -1057,10 +1081,16 @@ mod tests {
         }
     }
 
-    impl McpHost for MockHost {
-        fn call(&self, tool: &str, args: &str) -> Result<String, ToolError> {
+    impl Host for MockHost {
+        fn list_tools(&self) -> Result<Vec<ToolInfo>, ToolError> {
+            Ok(self.tools.clone())
+        }
+        fn call(&self, tool: &str, args: &str, origin: CallOrigin) -> Result<String, ToolError> {
             let parsed = serde_json::from_str(args).unwrap_or(Value::String(args.into()));
-            self.calls.lock().unwrap().push((tool.to_string(), parsed));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool.to_string(), parsed, origin));
             self.results
                 .lock()
                 .unwrap()
@@ -1068,13 +1098,6 @@ mod tests {
                 .and_then(VecDeque::pop_front)
                 .unwrap_or_else(|| Ok(json!({ "done": tool }).to_string()))
         }
-
-        fn list_tools(&self) -> Result<Vec<ToolInfo>, ToolError> {
-            Ok(self.tools.clone())
-        }
-    }
-
-    impl Host for MockHost {
         fn state_get(&self, key: &str) -> Option<String> {
             self.gets.lock().unwrap().push(key.to_string());
             self.state.lock().unwrap().get(key).cloned()
@@ -1234,6 +1257,17 @@ mod tests {
                 ("comment".into(), json!({"id": 1, "text": "s1"})),
                 ("comment".into(), json!({"id": 2, "text": "s2"})),
                 ("comment".into(), json!({"id": 3, "text": "s3"})),
+            ]
+        );
+        assert_eq!(
+            host.origins(),
+            vec![
+                ("search".into(), CallOrigin::Model),
+                ("search".into(), CallOrigin::ToolStep),
+                ("add_label".into(), CallOrigin::ActStep),
+                ("comment".into(), CallOrigin::ActStep),
+                ("comment".into(), CallOrigin::ActStep),
+                ("comment".into(), CallOrigin::ActStep),
             ]
         );
         let actions = out["actions"].as_array().unwrap();
@@ -1835,6 +1869,70 @@ mod tests {
     }
 
     #[test]
+    fn a_listed_tool_no_act_step_uses_is_called_with_model_origin() {
+        // `delete_repo` writes, but the host lists it and no act step names
+        // it, so the runner cannot tell: it offers it, and the call the
+        // model makes still carries `Model`, which a host can refuse on.
+        let host = MockHost::new(&["search", "delete_repo"]).script(vec![
+            calls_tool("1", "delete_repo", json!({"repo": "r"})),
+            text("{}"),
+        ]);
+        let spec = pipe(json!([
+            agent("x", json!({})),
+            {"id": "w", "kind": "act", "tool": "write", "args": {}}
+        ]));
+        run_ok(&host, spec, json!({}));
+        assert_eq!(
+            host.origins(),
+            vec![
+                ("delete_repo".into(), CallOrigin::Model),
+                ("write".into(), CallOrigin::ActStep),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_model_naming_an_act_tool_is_never_dispatched() {
+        // Whether or not the host lists `write`, the model's call to it gets
+        // an error result and never reaches the host under any origin.
+        for listed in [&["search", "write"][..], &["search"][..]] {
+            let host = MockHost::new(listed)
+                .script(vec![calls_tool("1", "write", json!({"x": 1})), text("{}")]);
+            let spec = pipe(json!([
+                agent("x", json!({})),
+                {"id": "w", "kind": "act", "tool": "write", "args": {"x": 2}}
+            ]));
+            run_ok(&host, spec, json!({}));
+            assert_eq!(
+                last_tool_result(&host.requests()[1]).content,
+                NOT_OFFERED,
+                "{listed:?}"
+            );
+            assert_eq!(
+                host.calls(),
+                vec![("write".into(), json!({"x": 2}))],
+                "{listed:?}"
+            );
+            assert_eq!(
+                host.origins(),
+                vec![("write".into(), CallOrigin::ActStep)],
+                "{listed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_origin_in_model_arguments_is_just_data() {
+        let args = json!({"q": "x", "origin": "act-step"});
+        let host = MockHost::new(&["search"])
+            .script(vec![calls_tool("1", "search", args.clone()), text("{}")]);
+        run_ok(&host, pipe(json!([agent("x", json!({}))])), json!({}));
+        // The arguments pass through unchanged; the origin is still `Model`.
+        assert_eq!(host.calls(), vec![("search".into(), args)]);
+        assert_eq!(host.origins(), vec![("search".into(), CallOrigin::Model)]);
+    }
+
+    #[test]
     fn act_tools_the_host_lists_are_never_offered() {
         let host = MockHost::new(&["search", "write"])
             .script(vec![calls_tool("1", "write", json!({})), text("{}")]);
@@ -1849,6 +1947,7 @@ mod tests {
         assert_eq!(last_tool_result(&reqs[1]).content, NOT_OFFERED);
         // Only the act step itself called `write`.
         assert_eq!(host.calls(), vec![("write".into(), json!({}))]);
+        assert_eq!(host.origins(), vec![("write".into(), CallOrigin::ActStep)]);
         let logs = host.logs.lock().unwrap();
         assert!(
             logs.iter()
