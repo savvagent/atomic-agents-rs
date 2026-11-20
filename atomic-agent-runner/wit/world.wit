@@ -59,7 +59,13 @@ interface types {
     /// JSON Schema the reply must follow, as a JSON document.
     output-schema: option<string>,
     max-tokens: option<u32>,
-    /// Further sampling parameters, as a JSON object document.
+    /// Further sampling parameters, as a JSON object document. They come
+    /// from the pipeline spec. Hosts must not honour keys that select or
+    /// force a tool or pick the output format (`tool_choice`, `tool_config`,
+    /// `toolConfig`, `function_call`, `functionCallingConfig`, `tools`,
+    /// `output_config`, `output_format`, `response_format`, or any other
+    /// spelling their provider reads): the runner rejects these, but a host
+    /// must not rely on the guest for it.
     params: option<string>,
   }
 
@@ -152,12 +158,19 @@ interface mcp {
   /// Calls `tool` with `args`, a JSON document, and returns its output.
   call: func(tool: string, args: string) -> result<string, tool-error>;
 
-  /// Lists the tools the host chooses to expose to this run, and only
-  /// those: the guest offers the model nothing else.
+  /// Lists the tools the model may be offered in this run: the guest offers
+  /// it nothing else. List read tools only. A tool that changes something
+  /// belongs in an `act` step, which calls it by name with arguments the
+  /// spec fixes and checks; the runner never offers a tool an act step
+  /// uses, but it cannot know which other tools write.
   list-tools: func() -> result<list<tool-info>, tool-error>;
 }
 
 /// A string key-value store that persists between runs.
+///
+/// Keys come from the spec and are not namespaced by the guest: hosts must
+/// scope the store per pipeline and per tenant, so one pipeline or tenant
+/// can never read or overwrite another's values.
 interface state {
   /// Reads a value written by an earlier run, if any.
   get: func(key: string) -> option<string>;
@@ -184,7 +197,9 @@ interface clock {
 /// reached through these imports.
 ///
 /// Hosts are expected to give the guest an empty environment, no args, no
-/// preopened directories and no inherited stdio.
+/// preopened directories and no inherited stdio, and to bound each run with
+/// a memory limit and fuel or epoch interruption: the guest's own limits
+/// count calls and items, not CPU time or memory.
 world runner {
   import llm;
   import mcp;

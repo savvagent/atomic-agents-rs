@@ -221,7 +221,7 @@ Without `native` and without a provider feature, `AtomicAgent::run` drives the f
 - imports: `llm` (`complete`), `mcp` (`call`, `list-tools`), `state` (`get`, `set`), `log` and `clock`;
 - export: `run(spec, event)`.
 
-Steps are `agent`, `tool`, `act` and `foreach` (at most 100 items, no nesting). Conditions are expressions or the studio's structured form. `act` arguments must be a literal object in the spec. Limits: `max_turns` defaults to 8 (at most 32), `max_retries` defaults to 2 (at most 5), and a run is capped at 500 tool calls and 200 LLM calls. `state` writes are committed only when the run succeeds.
+Steps are `agent`, `tool`, `act` and `foreach` (at most 100 items, no nesting). Conditions are expressions or the studio's structured form. `act` arguments must be a literal object in the spec. An agent step's `system_prompt` is a literal (no templates); its rendered `input` reaches the model XML-escaped inside `<untrusted-input>`, tool output (cut to 64 KiB) inside `<untrusted-tool-output>`, and the system text ends by saying wrapped text is data. Agent `params` may not choose a tool or the output format, an agent step may not name a tool that an act step uses, and output schemas cannot retrieve external `$ref`s. Limits: `max_turns` defaults to 8 (at most 32), `max_retries` defaults to 2 (at most 5), a run is capped at 500 tool calls (every call the model makes counts) and 200 LLM calls, and the spec and event are each at most 1 MiB. `state` writes are committed only when the run succeeds.
 
 ```bash
 cargo build -p atomic-agent-runner --release --target wasm32-wasip2
@@ -238,7 +238,10 @@ The guest reaches the outside world only through the world's imports. A host is 
 
 - an empty environment, no arguments, no preopened directories and no inherited stdio;
 - no network access: model calls go through `llm.complete` and tool calls through `mcp.call`;
-- from `mcp.list-tools`, only the tools the host chooses to expose to the run; the guest offers the model nothing else.
+- from `mcp.list-tools`, only read tools: the guest offers the model nothing else, and never a tool an `act` step uses, but it cannot tell which other tools write;
+- a `state` store scoped per pipeline and per tenant (keys come from the spec and are not namespaced by the guest);
+- a memory limit and fuel or epoch interruption for each run;
+- no honouring of tool-forcing keys (`tool_choice`, `toolConfig`, `response_format`, ...) in `completion-request.params`; the runner rejects them, but a host should not rely on that.
 
 The component imports only the world's interfaces plus `wasi:cli`, `wasi:io`, `wasi:clocks` and `wasi:random` (pulled in by Rust's standard library), and never `wasi:filesystem`, `wasi:sockets` or `wasi:http`; a host test checks this.
 
