@@ -7,8 +7,8 @@ use atomic_agents::guest::TOOL_FORCING_KEYS;
 use crate::condition::{check_bounds, parse};
 use crate::schema::compile;
 use crate::spec::{
-    Condition, MAX_FOREACH_ITEMS, MAX_MAX_RETRIES, MAX_MAX_TURNS, MAX_STATE_KEY_LEN, Pipeline,
-    Step, StepKind, valid_state_key,
+    ALLOWED_AGENT_PARAMS, Condition, MAX_FOREACH_ITEMS, MAX_MAX_RETRIES, MAX_MAX_TURNS,
+    MAX_STATE_KEY_LEN, Pipeline, Step, StepKind, valid_state_key,
 };
 
 /// Checks every rule serde cannot; returns all violations, each prefixed with
@@ -190,13 +190,23 @@ impl Ctx {
                         "must be a literal; templates ({{ ... }}) belong in input",
                     );
                 }
-                // The host owns tool choice and output format; a spec that
-                // could force a tool call could steer the model past it.
-                for key in TOOL_FORCING_KEYS {
-                    if a.params.as_ref().is_some_and(|p| p.contains_key(key)) {
+                // An allowlist, not a denylist: the host owns tool choice,
+                // output format, the system text, the messages and the model,
+                // and a spec that set any of them could undo the marking of
+                // untrusted input or force a tool call.
+                for key in a.params.iter().flat_map(|p| p.keys()) {
+                    if !ALLOWED_AGENT_PARAMS.contains(&key.as_str()) {
+                        let why = if TOOL_FORCING_KEYS.contains(&key.as_str()) {
+                            "is reserved for the host"
+                        } else {
+                            "is not an allowed parameter"
+                        };
                         self.err(
                             &format!("{at}/params"),
-                            format!("'{key}' is reserved for the host"),
+                            format!(
+                                "'{key}' {why} (allowed: {})",
+                                ALLOWED_AGENT_PARAMS.join(", ")
+                            ),
                         );
                     }
                 }
@@ -234,6 +244,11 @@ impl Ctx {
                 }
                 if let Some(name) = &f.as_ {
                     self.name(&format!("{at}/as"), "as", name);
+                    // Same reason as step ids: conditions must be able to
+                    // reference the item.
+                    if !name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+                        self.err(&format!("{at}/as"), "as must start with a letter or '_'");
+                    }
                     if name == "event" || name == "state" {
                         self.err(&format!("{at}/as"), format!("'{name}' is reserved"));
                     }
@@ -458,10 +473,37 @@ mod tests {
             assert!(has(&e, "/steps/0/params"), "{key}: {e:?}");
             assert!(has(&e, key), "{key}: {e:?}");
         }
-        // Case-sensitive: only the spellings providers read are reserved.
+        // Only sampling and length parameters are allowed: a spec may not
+        // replace the system text, the messages or the model either.
+        for key in [
+            "system",
+            "messages",
+            "model",
+            "stream",
+            "metadata",
+            "Tool_Choice",
+        ] {
+            let mut a = agent("a");
+            a["params"] = json!({key: 1, "temperature": 0.1});
+            let e = errs(pipe(vec![a]));
+            assert!(has(&e, "/steps/0/params"), "{key}: {e:?}");
+        }
         let mut a = agent("a");
-        a["params"] = json!({"Tool_Choice": 1, "temperature": 0.1});
+        a["params"] = json!({
+            "temperature": 0.1, "top_p": 0.9, "top_k": 5,
+            "stop_sequences": ["END"], "max_tokens": 100, "effort": "low"
+        });
         assert_eq!(check(pipe(vec![a])), Ok(()));
+    }
+
+    #[test]
+    fn foreach_as_must_start_with_a_letter() {
+        let mut f = json!({"id": "each", "kind": "foreach", "items": "event.items",
+            "as": "1row", "max_items": 3, "steps": [tool("g")]});
+        let e = errs(pipe(vec![f.clone()]));
+        assert!(has(&e, "/steps/0/as"), "{e:?}");
+        f["as"] = json!("row");
+        assert_eq!(check(pipe(vec![f])), Ok(()));
     }
 
     #[test]

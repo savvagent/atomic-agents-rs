@@ -60,7 +60,9 @@ interface types {
     output-schema: option<string>,
     max-tokens: option<u32>,
     /// Further sampling parameters, as a JSON object document. They come
-    /// from the pipeline spec. Hosts must not honour keys that select or
+    /// from the pipeline spec, which the runner limits to `temperature`,
+    /// `top_p`, `top_k`, `stop_sequences` and `effort`; hosts should apply
+    /// an allowlist of their own too. Hosts must not honour keys that select or
     /// force a tool or pick the output format (`tool_choice`, `tool_config`,
     /// `toolConfig`, `function_call`, `functionCallingConfig`, `tools`,
     /// `output_config`, `output_format`, `response_format`, or any other

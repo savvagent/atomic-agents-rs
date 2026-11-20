@@ -17,7 +17,7 @@ pub mod google;
 /// forced choice is rejected by current models) and send exactly the tools
 /// the request names, so `extra` may not change either; such keys are
 /// skipped with a warning.
-#[cfg(any(feature = "anthropic", feature = "google"))]
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "google"))]
 pub(crate) fn is_tool_choice_key(key: &str) -> bool {
     matches!(key, "tool_choice" | "toolConfig" | "tool_config" | "tools")
 }

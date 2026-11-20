@@ -655,6 +655,15 @@ impl Runner<'_> {
             format!("{}\n\n{UNTRUSTED_NOTICE}", a.system_prompt)
         };
         let input = render(&a.input, ctx.value()).map_err(|e| fail(step, e))?;
+        // Templating can repeat event or step data, so the rendered input
+        // gets the same cap as the run's own inputs.
+        let input_len = input.to_string().len();
+        if input_len > MAX_INPUT_BYTES {
+            return Err(fail(
+                step,
+                format!("rendered input is {input_len} bytes; at most {MAX_INPUT_BYTES}"),
+            ));
+        }
         let validator = crate::schema::compile(&a.output_schema)
             .map_err(|e| fail(step, format!("invalid output_schema: {e}")))?;
         let (max_tokens, params) = split_params(step, a.params.as_ref())?;
@@ -1873,6 +1882,24 @@ mod tests {
         }
         let at_limit = format!("{{}}{}", " ".repeat(crate::spec::MAX_INPUT_BYTES - 2));
         assert!(run(&host, &spec, &at_limit).is_ok());
+    }
+
+    #[test]
+    fn oversized_agent_input_fails_before_any_model_call() {
+        // The event is under the run's input cap, but templating it twice
+        // into one agent input is not.
+        let half = "a".repeat(crate::spec::MAX_INPUT_BYTES / 2 + 1);
+        let mut step = agent("x", json!({}));
+        step["input"] = json!("{{event.big}}{{event.big}}");
+        let host = MockHost::new(&[]).script(vec![text("{}")]);
+        match run_err(&host, pipe(json!([step])), json!({"big": half})) {
+            RunError::StepFailed { step, message } => {
+                assert_eq!(step, "x");
+                assert!(message.contains("input"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(host.requests().is_empty(), "no model call");
     }
 
     #[test]

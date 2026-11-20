@@ -28,6 +28,17 @@ pub const MAX_LLM_CALLS: u32 = 200;
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 /// Longest state key.
 pub const MAX_STATE_KEY_LEN: usize = 128;
+/// The only keys an agent step's `params` may set: sampling, length and
+/// effort. Everything else in a request (model, system text, messages,
+/// tools, tool choice, output format) is set by the runner or the host.
+pub const ALLOWED_AGENT_PARAMS: [&str; 6] = [
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stop_sequences",
+    "effort",
+];
 
 /// Whether `c` may appear in a state key: `[A-Za-z0-9_-]`.
 pub fn is_state_key_char(c: char) -> bool {
@@ -125,9 +136,10 @@ pub struct AgentStep {
     /// uses may not be named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
-    /// Extra model parameters. Keys that choose a tool or the output format
-    /// ([`TOOL_FORCING_KEYS`](atomic_agents::guest::TOOL_FORCING_KEYS)) are
-    /// rejected.
+    /// Extra model parameters, limited to [`ALLOWED_AGENT_PARAMS`]; any other
+    /// key, including those that choose a tool or the output format
+    /// ([`TOOL_FORCING_KEYS`](atomic_agents::guest::TOOL_FORCING_KEYS)), is
+    /// a validation error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Map<String, Value>>,
 }
