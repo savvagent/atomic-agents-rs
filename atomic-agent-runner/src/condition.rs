@@ -1,7 +1,8 @@
 //! The condition language.
 //!
 //! [`ConditionExpr`] and [`evaluate`] port `atomic-studio-runner`'s
-//! `condition.rs` (same serde tags, same semantics): a leaf that reads a
+//! `condition.rs` (same serde tags, same semantics, except that numbers
+//! compare by value, see [`json_eq`]): a leaf that reads a
 //! missing or null field is an error that propagates through `!`, `&&`, `||`;
 //! only `exists` inspects a missing field without erroring. [`parse`] turns
 //! the string form into the same tree.
@@ -81,8 +82,8 @@ pub enum WhenOutcome {
 pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool, ConditionError> {
     use ConditionExpr as C;
     match expr {
-        C::Equals { field, value } => Ok(get_field(data, field)? == value),
-        C::NotEquals { field, value } => Ok(get_field(data, field)? != value),
+        C::Equals { field, value } => Ok(json_eq(get_field(data, field)?, value)),
+        C::NotEquals { field, value } => Ok(!json_eq(get_field(data, field)?, value)),
         C::Contains { field, value } => Ok(match get_field(data, field)? {
             Value::String(s) => s.contains(value.as_str()),
             Value::Array(a) => a.iter().any(|v| v.as_str() == Some(value.as_str())),
@@ -104,7 +105,10 @@ pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool, ConditionErr
             Some(s) => Ok(compile_regex(pattern)?.is_match(s)),
             None => Ok(false),
         },
-        C::In { field, values } => Ok(values.contains(get_field(data, field)?)),
+        C::In { field, values } => {
+            let v = get_field(data, field)?;
+            Ok(values.iter().any(|x| json_eq(x, v)))
+        }
         C::Exists { field } => Ok(get_field(data, field).is_ok()),
         C::And { conditions } => {
             for c in conditions {
@@ -123,6 +127,25 @@ pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool, ConditionErr
             Ok(false)
         }
         C::Not { condition } => Ok(!evaluate(condition, data)?),
+    }
+}
+
+/// JSON equality where `1` and `1.0` are equal; integers compare exactly.
+/// Used by conditions (`==`, `!=`, `in`) and by act constraints (`eq`,
+/// `in`), so the two agree.
+///
+/// ```
+/// use atomic_agent_runner::condition::json_eq;
+/// use serde_json::json;
+/// assert!(json_eq(&json!(1), &json!(1.0)));
+/// assert!(!json_eq(&json!(1), &json!("1")));
+/// ```
+pub fn json_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) if x.is_f64() || y.is_f64() => {
+            x.as_f64() == y.as_f64()
+        }
+        _ => a == b,
     }
 }
 
@@ -604,6 +627,22 @@ mod tests {
             evaluate(&bad, &data),
             Err(ConditionError::Regex { .. })
         ));
+    }
+
+    #[test]
+    fn numbers_compare_across_integer_and_float() {
+        let d = json!({"i": 1, "f": 1.0, "big": 9007199254740993u64});
+        assert_eq!(ev("f == 1", &d), Ok(true));
+        assert_eq!(ev("i == 1.0", &d), Ok(true));
+        assert_eq!(ev("f != 1", &d), Ok(false));
+        assert_eq!(ev("f in [1, 2]", &d), Ok(true));
+        let eq = ConditionExpr::Equals {
+            field: "i".into(),
+            value: json!(1.0),
+        };
+        assert_eq!(evaluate(&eq, &d), Ok(true));
+        // Integers still compare exactly.
+        assert_eq!(ev("big == 9007199254740992", &d), Ok(false));
     }
 
     #[test]

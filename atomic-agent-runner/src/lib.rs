@@ -14,6 +14,7 @@ mod component;
 pub mod condition;
 pub mod host;
 pub mod interpreter;
+pub mod schema;
 pub mod spec;
 pub mod template;
 pub mod validate;

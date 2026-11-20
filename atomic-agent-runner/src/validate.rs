@@ -2,9 +2,13 @@
 
 use std::collections::BTreeSet;
 
+use atomic_agents::guest::TOOL_FORCING_KEYS;
+
 use crate::condition::{check_bounds, parse};
+use crate::schema::compile;
 use crate::spec::{
-    Condition, MAX_FOREACH_ITEMS, MAX_MAX_RETRIES, MAX_MAX_TURNS, Pipeline, Step, StepKind,
+    Condition, MAX_FOREACH_ITEMS, MAX_MAX_RETRIES, MAX_MAX_TURNS, MAX_STATE_KEY_LEN, Pipeline,
+    Step, StepKind, valid_state_key,
 };
 
 /// Checks every rule serde cannot; returns all violations, each prefixed with
@@ -31,6 +35,7 @@ pub fn validate(p: &Pipeline) -> Result<(), Vec<String>> {
     let mut ctx = Ctx {
         errs,
         reserved,
+        act_tools: act_tools(&p.steps),
         seen: BTreeSet::new(),
         pipeline_model: p.model.is_some(),
     };
@@ -51,10 +56,30 @@ fn collect_as_names(steps: &[Step], out: &mut BTreeSet<String>) {
     }
 }
 
+/// The tool of every act step, foreach bodies included.
+pub(crate) fn act_tools(steps: &[Step]) -> BTreeSet<String> {
+    fn walk(steps: &[Step], out: &mut BTreeSet<String>) {
+        for s in steps {
+            match &s.kind {
+                StepKind::Act(a) => {
+                    out.insert(a.tool.clone());
+                }
+                StepKind::Foreach(f) => walk(&f.steps, out),
+                StepKind::Agent(_) | StepKind::Tool(_) => {}
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(steps, &mut out);
+    out
+}
+
 struct Ctx {
     errs: Vec<String>,
     /// `event`, `state` and every foreach item name.
     reserved: BTreeSet<String>,
+    /// Tools that act steps use; the model may never be offered one.
+    act_tools: BTreeSet<String>,
     seen: BTreeSet<String>,
     pipeline_model: bool,
 }
@@ -88,6 +113,22 @@ impl Ctx {
     fn step(&mut self, step: &Step, at: &str, nested: bool) {
         let id_path = format!("{at}/id");
         self.name(&id_path, "id", &step.id);
+        // A condition path starts with a letter or `_`, so an id that does
+        // not could never be referenced.
+        if !step
+            .id
+            .starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        {
+            self.err(&id_path, "id must start with a letter or '_'");
+        }
+        for key in step.set_state.iter().flat_map(|m| m.keys()) {
+            if !valid_state_key(key) {
+                self.err(
+                    &format!("{at}/set_state"),
+                    format!("key {key:?} must be 1-{MAX_STATE_KEY_LEN} of [A-Za-z0-9_-]"),
+                );
+            }
+        }
         if self.reserved.contains(&step.id) {
             self.err(
                 &id_path,
@@ -135,11 +176,39 @@ impl Ctx {
                         format!("must be in 0..={MAX_MAX_RETRIES}"),
                     );
                 }
-                if let Err(e) = jsonschema::validator_for(&a.output_schema) {
+                if let Err(e) = compile(&a.output_schema) {
                     self.err(
                         &format!("{at}/output_schema"),
                         format!("invalid JSON Schema: {e}"),
                     );
+                }
+                // Literal only: a template would let event or tool data
+                // write the model's instructions.
+                if a.system_prompt.contains("{{") {
+                    self.err(
+                        &format!("{at}/system_prompt"),
+                        "must be a literal; templates ({{ ... }}) belong in input",
+                    );
+                }
+                // The host owns tool choice and output format; a spec that
+                // could force a tool call could steer the model past it.
+                for key in TOOL_FORCING_KEYS {
+                    if a.params.as_ref().is_some_and(|p| p.contains_key(key)) {
+                        self.err(
+                            &format!("{at}/params"),
+                            format!("'{key}' is reserved for the host"),
+                        );
+                    }
+                }
+                for name in a.tools.iter().flatten() {
+                    if self.act_tools.contains(name) {
+                        self.err(
+                            &format!("{at}/tools"),
+                            format!(
+                                "'{name}' is used by an act step, so it cannot be offered to the model"
+                            ),
+                        );
+                    }
                 }
             }
             StepKind::Tool(_) => {}
@@ -355,6 +424,101 @@ mod tests {
         let mut a = agent("a");
         a["output_schema"] = json!({"$ref": "https://example.invalid/schema.json"});
         assert!(has(&errs(pipe(vec![a])), "/steps/0/output_schema"));
+    }
+
+    #[test]
+    fn external_refs_in_output_schema_are_refused() {
+        for r in ["http://127.0.0.1:9/x", "file:///etc/hostname"] {
+            let mut a = agent("a");
+            a["output_schema"] = json!({"$ref": r});
+            let e = errs(pipe(vec![a]));
+            assert!(
+                has(&e, "/steps/0/output_schema") && has(&e, "retrieval is disabled"),
+                "{r}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_forcing_params_are_rejected() {
+        for key in [
+            "tool_choice",
+            "tool_config",
+            "toolConfig",
+            "function_call",
+            "functionCallingConfig",
+            "tools",
+            "output_config",
+            "output_format",
+            "response_format",
+        ] {
+            let mut a = agent("a");
+            a["params"] = json!({key: {"type": "any"}, "temperature": 0.1});
+            let e = errs(pipe(vec![a]));
+            assert!(has(&e, "/steps/0/params"), "{key}: {e:?}");
+            assert!(has(&e, key), "{key}: {e:?}");
+        }
+        // Case-sensitive: only the spellings providers read are reserved.
+        let mut a = agent("a");
+        a["params"] = json!({"Tool_Choice": 1, "temperature": 0.1});
+        assert_eq!(check(pipe(vec![a])), Ok(()));
+    }
+
+    #[test]
+    fn system_prompt_must_be_a_literal() {
+        let mut a = agent("a");
+        a["system_prompt"] = json!("Triage {{ event.title }}");
+        assert!(has(&errs(pipe(vec![a])), "/steps/0/system_prompt"));
+        let mut a = agent("a");
+        a["system_prompt"] = json!("Use { and } freely.");
+        assert_eq!(check(pipe(vec![a])), Ok(()));
+    }
+
+    #[test]
+    fn agent_tools_may_not_name_an_act_tool() {
+        let act = |id: &str, tool: &str| json!({"id": id, "kind": "act", "tool": tool, "args": {}});
+        let mut a = agent("a");
+        a["tools"] = json!(["search", "write", "close"]);
+        let f = json!({"id": "f", "kind": "foreach", "items": "x", "max_items": 1,
+                       "steps": [act("inner", "close")]});
+        let e = errs(pipe(vec![a, act("w", "write"), f]));
+        assert!(has(&e, "/steps/0/tools") && has(&e, "'write'"), "{e:?}");
+        assert!(has(&e, "/steps/0/tools") && has(&e, "'close'"), "{e:?}");
+        assert!(!has(&e, "'search'"), "{e:?}");
+        // An agent inside a foreach is checked against acts outside it.
+        let mut inner = agent("in");
+        inner["tools"] = json!(["write"]);
+        let f = json!({"id": "f", "kind": "foreach", "items": "x", "max_items": 1,
+                       "steps": [inner]});
+        assert!(has(
+            &errs(pipe(vec![f, act("w", "write")])),
+            "/steps/0/steps/0/tools"
+        ));
+    }
+
+    #[test]
+    fn ids_start_with_a_letter_or_underscore() {
+        for bad in ["1a", "-a", "9"] {
+            let e = errs(pipe(vec![tool(bad)]));
+            assert!(has(&e, "/steps/0/id"), "{bad}: {e:?}");
+        }
+        assert_eq!(check(pipe(vec![tool("_a"), tool("b1-c")])), Ok(()));
+    }
+
+    #[test]
+    fn set_state_keys_follow_the_state_key_rule() {
+        let with = |key: &str| {
+            let mut t = tool("t");
+            t["set_state"] = json!({key: "x"});
+            t
+        };
+        for bad in ["", "a.b", "a b", "\u{e9}", &"k".repeat(129)] {
+            let e = errs(pipe(vec![with(bad)]));
+            assert!(has(&e, "/steps/0/set_state"), "{bad:?}: {e:?}");
+        }
+        for good in ["Last_id-2", &"k".repeat(128)] {
+            assert_eq!(check(pipe(vec![with(good)])), Ok(()), "{good}");
+        }
     }
 
     #[test]

@@ -24,6 +24,27 @@ pub const MAX_MAX_RETRIES: u32 = 5;
 pub const MAX_TOOL_CALLS: u32 = 500;
 /// LLM calls one run may make.
 pub const MAX_LLM_CALLS: u32 = 200;
+/// Largest spec or event document, in bytes, that a run accepts.
+pub const MAX_INPUT_BYTES: usize = 1 << 20;
+/// Longest state key.
+pub const MAX_STATE_KEY_LEN: usize = 128;
+
+/// Whether `c` may appear in a state key: `[A-Za-z0-9_-]`.
+pub fn is_state_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Whether `key` is a state key: 1 to [`MAX_STATE_KEY_LEN`] of
+/// `[A-Za-z0-9_-]`, the same characters a `state.<key>` path reads.
+///
+/// ```
+/// use atomic_agent_runner::spec::valid_state_key;
+/// assert!(valid_state_key("last_id-2"));
+/// assert!(!valid_state_key("a.b") && !valid_state_key(""));
+/// ```
+pub fn valid_state_key(key: &str) -> bool {
+    (1..=MAX_STATE_KEY_LEN).contains(&key.len()) && key.chars().all(is_state_key_char)
+}
 
 /// A whole pipeline.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -50,7 +71,8 @@ pub struct Step {
     /// Run the step only when this holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
-    /// State keys to write after the step, each a template. Later steps see
+    /// State keys (see [`valid_state_key`]) to write after the step, each a
+    /// template. Later steps see
     /// the new values under `state` at once; the host's store gets them only
     /// when the whole run succeeds, so a failed run commits no state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,9 +104,11 @@ pub enum StepKind {
 /// An LLM call with structured output.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AgentStep {
-    /// System prompt (templated).
+    /// System prompt: a literal, never templated, so event and tool data
+    /// cannot reach the model as instructions. Validation rejects `{{`.
     pub system_prompt: String,
-    /// Input value (templated).
+    /// Input value (templated). The model receives it XML-escaped inside an
+    /// `<untrusted-input>` wrapper.
     pub input: Value,
     /// JSON Schema the output must satisfy.
     pub output_schema: Value,
@@ -97,10 +121,13 @@ pub struct AgentStep {
     /// Retries on invalid output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
-    /// Names of the tools the model may call.
+    /// Names of the tools the model may call. A tool that any act step
+    /// uses may not be named.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
-    /// Extra model parameters.
+    /// Extra model parameters. Keys that choose a tool or the output format
+    /// ([`TOOL_FORCING_KEYS`](atomic_agents::guest::TOOL_FORCING_KEYS)) are
+    /// rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Map<String, Value>>,
 }
