@@ -142,7 +142,17 @@ impl Ctx {
                     );
                 }
             }
-            StepKind::Tool(_) | StepKind::Act(_) => {}
+            StepKind::Tool(_) => {}
+            StepKind::Act(a) => {
+                // The spec fixes an act's argument keys; only values may be
+                // templates, so event or model data cannot add arguments.
+                if !a.args.is_object() {
+                    self.err(
+                        &format!("{at}/args"),
+                        "act arguments must be a JSON object (values may be templates)",
+                    );
+                }
+            }
             StepKind::Foreach(f) => {
                 if nested {
                     self.err(at, "foreach cannot be nested inside another foreach");
@@ -357,6 +367,29 @@ mod tests {
         let ae = errs(pipe(vec![a])).remove(0);
         assert!(pe.ends_with("must be in 0..=5"), "{pe}");
         assert!(ae.ends_with("must be in 0..=5"), "{ae}");
+    }
+
+    #[test]
+    fn act_args_must_be_a_literal_object() {
+        let act = |args: Value| json!({"id": "c", "kind": "act", "tool": "w", "args": args});
+        assert_eq!(
+            check(pipe(vec![act(json!({"label": "{{ a.label }}", "n": 1}))])),
+            Ok(())
+        );
+        for bad in [json!("{{triage}}"), json!(["x"]), json!(3)] {
+            let e = errs(pipe(vec![act(bad.clone())]));
+            assert!(
+                has(&e, "/steps/0/args: act arguments must be a JSON object"),
+                "{bad}: {e:?}"
+            );
+        }
+        let f = json!({"id": "f", "kind": "foreach", "items": "x", "max_items": 1,
+                       "steps": [act(json!("{{ item }}"))]});
+        assert!(has(&errs(pipe(vec![f])), "/steps/0/steps/0/args"));
+        // A tool step's arguments may still be one template.
+        let mut t = tool("t");
+        t["args"] = json!("{{ event }}");
+        assert_eq!(check(pipe(vec![t])), Ok(()));
     }
 
     #[test]

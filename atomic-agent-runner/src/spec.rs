@@ -50,7 +50,9 @@ pub struct Step {
     /// Run the step only when this holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
-    /// State keys to write after the step, each a template.
+    /// State keys to write after the step, each a template. Later steps see
+    /// the new values under `state` at once; the host's store gets them only
+    /// when the whole run succeeds, so a failed run commits no state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_state: Option<BTreeMap<String, Value>>,
     /// Kind-specific body.
@@ -117,7 +119,8 @@ pub struct ToolStep {
 pub struct ActStep {
     /// Tool name.
     pub tool: String,
-    /// Arguments (templated).
+    /// Arguments: a literal JSON object whose values may be templates. The
+    /// keys are fixed by the spec, so validation rejects any other shape.
     pub args: Value,
     /// Per-argument constraints checked before the call.
     #[serde(default, skip_serializing_if = "Option::is_none")]

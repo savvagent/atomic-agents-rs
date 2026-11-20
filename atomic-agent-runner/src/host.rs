@@ -27,7 +27,8 @@ pub enum Level {
 pub trait Host: LlmHost + McpHost {
     /// Reads a state value written by an earlier run, if any.
     fn state_get(&self, key: &str) -> Option<String>;
-    /// Writes a state value for later runs.
+    /// Writes a state value for later runs. The interpreter calls this only
+    /// after a run has succeeded, once per key written during it.
     fn state_set(&self, key: &str, value: &str);
     /// Emits one log line.
     fn log(&self, level: Level, msg: &str);
