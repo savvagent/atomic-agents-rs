@@ -93,9 +93,32 @@ pub struct CompletionRequest {
     pub output_schema: Option<String>,
     /// Upper bound on generated tokens.
     pub max_tokens: Option<u32>,
-    /// Further sampling parameters, as a JSON object document.
+    /// Further sampling parameters, as a JSON object document. Never holds
+    /// a [`TOOL_FORCING_KEYS`] key from [`HostLlmClient`]; a host must not
+    /// honour one from any guest.
     pub params: Option<String>,
 }
+
+/// Parameter keys that select or force a tool, or pick the output format.
+///
+/// The host owns these: it decides how structured output is obtained from
+/// [`CompletionRequest::output_schema`], and a forced tool call lets
+/// whoever writes the parameters steer the model past its instructions. So
+/// [`HostLlmClient`] rejects them in a request's extra parameters, and a
+/// guest that forwards parameters from untrusted input (such as a pipeline
+/// spec) should reject them too. Matching is case-sensitive: these are the
+/// spellings the providers read.
+pub const TOOL_FORCING_KEYS: [&str; 9] = [
+    "tool_choice",
+    "tool_config",
+    "toolConfig",
+    "function_call",
+    "functionCallingConfig",
+    "tools",
+    "output_config",
+    "output_format",
+    "response_format",
+];
 
 /// Token counts for one completion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,7 +206,9 @@ impl<T: LlmHost + ?Sized> LlmHost for Arc<T> {
 /// [`CompletionRequest::output_schema`] with no tools; `system` messages are
 /// joined into [`CompletionRequest::system`]; `max_tokens` is lifted out of
 /// the request's extra parameters and the rest go to
-/// [`CompletionRequest::params`].
+/// [`CompletionRequest::params`]. An extra parameter named in
+/// [`TOOL_FORCING_KEYS`] is an [`LlmError::InvalidRequest`], because the host,
+/// not the caller, decides how a tool is chosen.
 ///
 /// ```
 /// use atomic_agents::client::LlmClient;
@@ -253,6 +278,13 @@ impl<H: LlmHost> HostLlmClient<H> {
         };
 
         let mut extra: Map<String, Value> = request.extra.into_iter().collect();
+        // The host owns tool choice and output format; see TOOL_FORCING_KEYS.
+        if let Some(key) = TOOL_FORCING_KEYS.iter().find(|k| extra.contains_key(**k)) {
+            return Err(LlmError::InvalidRequest(format!(
+                "parameter `{key}` is reserved for the host"
+            ))
+            .into());
+        }
         let max_tokens = match extra.remove("max_tokens") {
             None => None,
             Some(value) => Some(
@@ -516,6 +548,29 @@ mod tests {
             "{message}"
         );
         assert!(host.requests().is_empty(), "nothing reaches the host");
+    }
+
+    #[test]
+    fn tool_forcing_keys_in_extra_are_rejected() {
+        for key in [
+            "tool_choice",
+            "tool_config",
+            "toolConfig",
+            "function_call",
+            "functionCallingConfig",
+            "tools",
+            "output_config",
+            "output_format",
+            "response_format",
+        ] {
+            let host = MockLlm::scripted(vec![]);
+            let client = HostLlmClient::new(host.clone());
+            let mut request = ChatRequest::new("m", vec![msg("user", json!("hi"))]);
+            request.extra = HashMap::from([(key.to_string(), json!({"type": "any"}))]);
+            let message = invalid_request(block_on(client.chat_completion(request)));
+            assert!(message.contains(key), "{key}: {message}");
+            assert!(host.requests().is_empty(), "{key} reached the host");
+        }
     }
 
     #[test]

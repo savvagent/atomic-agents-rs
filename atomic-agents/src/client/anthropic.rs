@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use reqwest::Client;
 
-use super::LlmClient;
 use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
+use super::{LlmClient, is_tool_choice_key};
 use crate::error::{ClientError, Error};
 
 /// Client for the Anthropic Messages API.
@@ -122,12 +122,19 @@ impl AnthropicClient {
             }
         }
 
-        // Merge extra parameters (skip max_tokens since we handled it)
+        // Merge extra parameters (skip max_tokens since we handled it). Keys
+        // that choose a tool are skipped: a forced `tool_choice` is rejected
+        // by current models, and the tools are what the request says.
         if let serde_json::Value::Object(map) = &mut body {
             for (k, v) in &request.extra {
-                if k != "max_tokens" {
-                    map.insert(k.clone(), v.clone());
+                if k == "max_tokens" {
+                    continue;
                 }
+                if is_tool_choice_key(k) {
+                    tracing::warn!(key = %k, "extra parameter may not override tool choice; skipped");
+                    continue;
+                }
+                map.insert(k.clone(), v.clone());
             }
         }
 
@@ -276,6 +283,9 @@ struct AnthropicSseStream<S> {
     inner: S,
     buffer: String,
     state: ToolStreamState,
+    /// Set once `inner` has ended; the stream then only returns `None`, so
+    /// `inner` is never polled after it finished.
+    finished: bool,
 }
 
 impl<S> AnthropicSseStream<S> {
@@ -284,6 +294,7 @@ impl<S> AnthropicSseStream<S> {
             inner,
             buffer: String::new(),
             state: ToolStreamState::new(has_tools),
+            finished: false,
         }
     }
 }
@@ -299,6 +310,9 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.finished {
+            return std::task::Poll::Ready(None);
+        }
 
         loop {
             while let Some(event) = next_anthropic_event(&mut this.buffer) {
@@ -321,6 +335,7 @@ where
                         this.buffer.push_str("\n\n");
                         continue;
                     }
+                    this.finished = true;
                     return std::task::Poll::Ready(this.state.finish().map(Ok));
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -514,6 +529,45 @@ mod tests {
         let system = body["system"].as_str().unwrap();
         assert!(system.starts_with("You are helpful."));
         assert!(system.ends_with("Respond by calling the `answer` tool."));
+    }
+
+    #[test]
+    fn extra_cannot_override_tool_choice_or_tools() {
+        let mut req = request(true);
+        req.extra
+            .insert("tool_choice".into(), json!({"type": "any"}));
+        req.extra.insert("tools".into(), json!([]));
+        req.extra.insert("toolConfig".into(), json!({}));
+        req.extra.insert("tool_config".into(), json!({}));
+        req.extra.insert("temperature".into(), json!(0.3));
+        let body = AnthropicClient::new("k").build_request_body(&req);
+        assert_eq!(body["tool_choice"], json!({"type": "auto"}));
+        assert_eq!(body["tools"][0]["name"], "answer");
+        assert!(body.get("toolConfig").is_none() && body.get("tool_config").is_none());
+        assert_eq!(body["temperature"], json!(0.3));
+
+        let mut plain = request(false);
+        plain
+            .extra
+            .insert("tool_choice".into(), json!({"type": "any"}));
+        let body = AnthropicClient::new("k").build_request_body(&plain);
+        assert!(body.get("tool_choice").is_none(), "{body}");
+    }
+
+    #[test]
+    fn stream_is_fused_after_the_inner_stream_ends() {
+        use futures::StreamExt;
+        let body = sse(&[text_delta("partial")]);
+        let stream = AnthropicSseStream::new(
+            crate::client::test_support::PanicAfterEnd::new(vec![Bytes::from(body)]),
+            true,
+        );
+        futures::executor::block_on(async {
+            let mut stream = stream;
+            assert_eq!(stream.next().await.unwrap().unwrap().delta, "partial");
+            assert!(stream.next().await.is_none());
+            assert!(stream.next().await.is_none());
+        });
     }
 
     #[test]

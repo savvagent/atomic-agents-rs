@@ -12,6 +12,59 @@ pub mod anthropic;
 #[cfg_attr(docsrs, doc(cfg(feature = "google")))]
 pub mod google;
 
+/// Whether an extra-parameter key would override the tools or the tool
+/// choice a provider client sets. Those clients let the model choose (a
+/// forced choice is rejected by current models) and send exactly the tools
+/// the request names, so `extra` may not change either; such keys are
+/// skipped with a warning.
+#[cfg(any(feature = "anthropic", feature = "google"))]
+pub(crate) fn is_tool_choice_key(key: &str) -> bool {
+    matches!(key, "tool_choice" | "toolConfig" | "tool_config" | "tools")
+}
+
+/// Test doubles shared by the provider clients' stream tests.
+#[cfg(all(test, any(feature = "anthropic", feature = "google")))]
+pub(crate) mod test_support {
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use bytes::Bytes;
+    use futures::Stream;
+
+    /// Yields its chunks, then `None` once, and panics if polled again: a
+    /// stream that is not fused may do anything after it ends.
+    pub(crate) struct PanicAfterEnd {
+        chunks: VecDeque<Bytes>,
+        ended: bool,
+    }
+
+    impl PanicAfterEnd {
+        pub(crate) fn new(chunks: Vec<Bytes>) -> Self {
+            Self {
+                chunks: chunks.into(),
+                ended: false,
+            }
+        }
+    }
+
+    impl Stream for PanicAfterEnd {
+        type Item = Result<Bytes, reqwest::Error>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            assert!(!this.ended, "polled after it returned None");
+            match this.chunks.pop_front() {
+                Some(b) => Poll::Ready(Some(Ok(b))),
+                None => {
+                    this.ended = true;
+                    Poll::Ready(None)
+                }
+            }
+        }
+    }
+}
+
 use std::pin::Pin;
 
 use async_trait::async_trait;

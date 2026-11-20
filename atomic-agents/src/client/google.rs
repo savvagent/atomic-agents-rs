@@ -5,8 +5,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use reqwest::Client;
 
-use super::LlmClient;
 use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
+use super::{LlmClient, is_tool_choice_key};
 use crate::error::{ClientError, Error};
 
 /// Client for Google Gemini (Generative Language API).
@@ -130,6 +130,11 @@ impl GoogleClient {
                 "temperature" | "top_p" | "top_k" | "max_output_tokens" | "candidate_count"
                 | "stop_sequences" => {
                     generation_config[k] = v.clone();
+                }
+                // `toolConfig` would let `extra` force a call (`ANY`), which
+                // this client avoids; `tools` would replace the declarations.
+                key if is_tool_choice_key(key) => {
+                    tracing::warn!(key, "extra parameter may not override tool choice; skipped");
                 }
                 _ => {
                     body[k] = v.clone();
@@ -321,6 +326,9 @@ struct GeminiSseStream<S> {
     has_tools: bool,
     held_text: String,
     saw_call: bool,
+    /// Set once `inner` has ended; the stream then only returns `None`, so
+    /// `inner` is never polled after it finished.
+    finished: bool,
 }
 
 impl<S> GeminiSseStream<S> {
@@ -331,6 +339,7 @@ impl<S> GeminiSseStream<S> {
             has_tools,
             held_text: String::new(),
             saw_call: false,
+            finished: false,
         }
     }
 
@@ -382,6 +391,9 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.finished {
+            return std::task::Poll::Ready(None);
+        }
 
         loop {
             while let Some(json) = next_gemini_event(&mut this.buffer) {
@@ -404,6 +416,7 @@ where
                         this.buffer.push_str("\n\n");
                         continue;
                     }
+                    this.finished = true;
                     return std::task::Poll::Ready(this.finish().map(Ok));
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -492,6 +505,47 @@ mod tests {
         let body = GoogleClient::new("k").build_request_body(&request(true, false));
         assert!(body.get("toolConfig").is_none());
         assert_eq!(system_text(&body), "You are helpful.");
+    }
+
+    #[test]
+    fn extra_cannot_override_tool_config_or_tools() {
+        let mut req = request(true, true);
+        req.extra.insert(
+            "toolConfig".into(),
+            json!({"functionCallingConfig": {"mode": "ANY"}}),
+        );
+        req.extra.insert(
+            "tool_config".into(),
+            json!({"function_calling_config": {"mode": "ANY"}}),
+        );
+        req.extra.insert("tool_choice".into(), json!("any"));
+        req.extra.insert("tools".into(), json!([]));
+        req.extra.insert("temperature".into(), json!(0.3));
+        let body = GoogleClient::new("k").build_request_body(&req);
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+        assert!(!body.to_string().contains("\"ANY\""), "{body}");
+        assert!(body.get("tool_config").is_none() && body.get("tool_choice").is_none());
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "answer"
+        );
+        assert_eq!(body["generationConfig"]["temperature"], json!(0.3));
+    }
+
+    #[test]
+    fn stream_is_fused_after_the_inner_stream_ends() {
+        use futures::StreamExt;
+        let body = format!("data: {}\n\n", chunk(json!([{"text": "partial"}]), None));
+        let stream = GeminiSseStream::new(
+            crate::client::test_support::PanicAfterEnd::new(vec![Bytes::from(body)]),
+            true,
+        );
+        futures::executor::block_on(async {
+            let mut stream = stream;
+            assert_eq!(stream.next().await.unwrap().unwrap().delta, "partial");
+            assert!(stream.next().await.is_none());
+            assert!(stream.next().await.is_none());
+        });
     }
 
     fn response(parts: serde_json::Value) -> serde_json::Value {

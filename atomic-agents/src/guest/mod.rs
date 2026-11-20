@@ -25,7 +25,7 @@ mod tool;
 
 pub use llm::{
     Completion, CompletionRequest, ContentBlock, HostLlmClient, LlmError, LlmHost, Message, Role,
-    ToolCall, ToolResult, ToolSpec, Usage,
+    TOOL_FORCING_KEYS, ToolCall, ToolResult, ToolSpec, Usage,
 };
 pub use tool::{
     HostTool, HostToolInput, HostToolOutput, HostToolset, McpHost, ToolError, ToolInfo,
