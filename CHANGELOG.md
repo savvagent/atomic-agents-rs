@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `atomic-agents` features `native` and `guest`. `native` (on by default through `openai`, and implied by `openai`, `anthropic`, `google` and `mcp`) carries `tokio`, `reqwest`, `tiktoken-rs`, `bytes`, `eventsource-stream` and `tokio-stream`. `guest` provides pure-Rust host traits and adapters (`atomic_agents::guest`) and builds with `cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2`.
+- `atomic-agent-runner`, a pipeline interpreter released as a WebAssembly component (`publish = false`; not on crates.io). WIT package `atomic-agents:runner@0.1.0`, world `runner`: imports `llm`, `mcp` (`call`, `list-tools`), `state`, `log` and `clock`; exports `run(spec, event)`. Steps: `agent`, `tool`, `act`, `foreach`. `atomic-agent-runner/host-tests` runs the component under wasmtime and checks that it imports no `wasi:filesystem`, `wasi:sockets` or `wasi:http`.
+
+### Breaking
+
+- `ClientError::Http` exists only with the `native` feature.
+- With `--no-default-features` and no provider feature, `AtomicAgent::run` uses `futures::executor::block_on`.
+
+### Changed
+
+- The Anthropic client no longer forces `tool_choice`. It sends `tool_choice: {"type":"auto"}` with a system instruction naming the extraction tool, because current Claude models reject a forced `tool_choice` with a 400. A model may now reply in text; the reply is parsed and retried if invalid.
+
 ## 0.2.1 — 2026-11-19
 
 ### Documentation

@@ -25,6 +25,7 @@ Built on [serde](https://serde.rs/) and [schemars](https://graham.cool/schemars/
   - [Context Providers](#context-providers)
   - [Chaining Schemas and Agents](#chaining-schemas-and-agents)
   - [MCP Tools](#mcp-tools)
+- [Running agents in a WebAssembly component](#running-agents-in-a-webassembly-component)
 - [Examples](#examples)
 - [Atomic Forge & CLI](#atomic-forge--cli)
 - [Project Structure](#project-structure)
@@ -199,6 +200,52 @@ Notes:
 - The orchestrator schema is deterministic (sorted keys) and lists `tool_name` first in `required`; it does not rely on property order.
 - The orchestrator schema drops each tool's own `$schema` and hoists its `$defs` into the root. Gemini function declarations do not support `$ref`/`$defs`, so tools whose schemas use them may need flattening for Google models.
 
+## Running agents in a WebAssembly component
+
+`atomic-agents` has two feature groups that decide what it depends on:
+
+- `native` (on by default through `openai`; implied by `openai`, `anthropic`, `google` and `mcp`) carries the network and runtime dependencies: `tokio`, `reqwest`, `tiktoken-rs`, `bytes`, `eventsource-stream` and `tokio-stream`. `ClientError::Http` exists only with `native`.
+- `guest` is pure Rust: host traits and adapters (`atomic_agents::guest`) that let an agent call a model and tools provided by the embedding host instead of opening connections itself. It builds for WebAssembly components:
+
+```bash
+rustup target add wasm32-wasip2
+cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2
+```
+
+Without `native` and without a provider feature, `AtomicAgent::run` drives the future with `futures::executor::block_on`.
+
+### The `atomic-agent-runner` component
+
+`atomic-agent-runner/` is a pipeline interpreter packaged as a WebAssembly component (not published to crates.io; it is released as a component). It runs a studio pipeline spec (JSON) against an event (JSON) and returns the outcome as JSON. Its WIT package is `atomic-agents:runner@0.1.0`, world `runner` (`atomic-agent-runner/wit/world.wit`):
+
+- imports: `llm` (`complete`), `mcp` (`call`, `list-tools`), `state` (`get`, `set`), `log` and `clock`;
+- export: `run(spec, event)`.
+
+Steps are `agent`, `tool`, `act` and `foreach` (at most 100 items, no nesting). Conditions are expressions or the studio's structured form. `act` arguments must be a literal object in the spec. Limits: `max_turns` defaults to 8 (at most 32), `max_retries` defaults to 2 (at most 5), and a run is capped at 500 tool calls and 200 LLM calls. `state` writes are committed only when the run succeeds.
+
+```bash
+cargo build -p atomic-agent-runner --release --target wasm32-wasip2
+# component: target/wasm32-wasip2/release/atomic_agent_runner.wasm
+cargo test -p atomic-agent-runner                # interpreter, native
+cargo test -p atomic-agent-runner-host-tests     # builds the component and runs it under wasmtime
+```
+
+`ATOMIC_AGENT_RUNNER_WASM=<file>` makes the host tests run a given component instead of building one.
+
+### What the host provides
+
+The guest reaches the outside world only through the world's imports. A host is expected to give it:
+
+- an empty environment, no arguments, no preopened directories and no inherited stdio;
+- no network access: model calls go through `llm.complete` and tool calls through `mcp.call`;
+- from `mcp.list-tools`, only the tools the host chooses to expose to the run; the guest offers the model nothing else.
+
+The component imports only the world's interfaces plus `wasi:cli`, `wasi:io`, `wasi:clocks` and `wasi:random` (pulled in by Rust's standard library), and never `wasi:filesystem`, `wasi:sockets` or `wasi:http`; a host test checks this.
+
+### Structured output
+
+`completion-request` has no field that selects or forces a tool: the host decides how to obtain a reply matching `output-schema`. The Anthropic client in this repo sends `tool_choice: {"type":"auto"}` with a system instruction naming the extraction tool, because current Claude models reject a forced `tool_choice` with a 400. The model may therefore reply in text; that reply is parsed, and retried if it is invalid.
+
 ## Examples
 
 Examples are in the `atomic-agents/examples/` directory. Run them with:
@@ -259,6 +306,8 @@ Atomic Agents uses a Cargo workspace with the following crates:
 2. **`atomic-agents-macros/`** — Proc macro crate providing `#[derive(IOSchema)]`
 3. **`atomic-forge/`** — Collection of reusable tools for use with agents
 4. **`atomic-assembler/`** — TUI application for browsing and downloading tools
+5. **`atomic-studio-runner/`** — Pipeline interpreter and HTTP server behind the studio
+6. **`atomic-agent-runner/`** — The pipeline interpreter as a WebAssembly component (`host-tests/` runs it under wasmtime)
 
 For local development:
 

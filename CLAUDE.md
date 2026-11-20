@@ -16,13 +16,17 @@ cargo test -p atomic-forge               # Test tools crate only
 cargo test test_agent_run_async          # Run a single test by name
 cargo test -p atomic-agents --features mcp --test mcp_integration  # MCP integration scenarios (harness=false)
 cargo build -p atomic-agents --features "openai,anthropic,google,mcp"  # All features
+cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2  # Guest build (needs `rustup target add wasm32-wasip2`)
+cargo build -p atomic-agent-runner --release --target wasm32-wasip2  # Runner component: target/wasm32-wasip2/release/atomic_agent_runner.wasm
+cargo test -p atomic-agent-runner        # Runner interpreter (native)
+cargo test -p atomic-agent-runner-host-tests  # Builds the component, runs it under wasmtime (ATOMIC_AGENT_RUNNER_WASM=<file> tests a given one)
 cargo run -p atomic-assembler            # Run the TUI tool browser
 cargo run --example basic_chatbot -p atomic-agents --features openai   # Run an example
 cargo run -p atomic-studio-runner -- serve --addr 127.0.0.1:8787 \
   --static-dir atomic-studio/build       # Serve the studio PWA + JSON API
 ```
 
-Feature flags on `atomic-agents`: `openai` (default), `anthropic`, `google`, `mcp`.
+Feature flags on `atomic-agents`: `openai` (default), `anthropic`, `google`, `mcp`, plus `native` (tokio/reqwest/tiktoken stack, implied by the provider features and `mcp`) and `guest` (pure-Rust host traits for wasm32-wasip2).
 
 ### atomic-studio (PWA)
 
@@ -50,13 +54,15 @@ API keys for agent execution come from environment variables: `OPENAI_API_KEY`,
 
 ## Workspace Structure
 
-Five crates in a Cargo workspace:
+Seven members in a Cargo workspace (`atomic-agent-runner/host-tests/env-probe` is an excluded fixture):
 
 - **`atomic-agents`** — Core framework: agent, LLM clients, schemas, chat history, streaming, hooks, MCP integration
 - **`atomic-agents-macros`** — Proc macro crate providing `#[derive(IOSchema)]`
 - **`atomic-forge`** — Collection of reusable tools (calculator, web search, scraper, YouTube transcripts)
 - **`atomic-assembler`** — TUI application (ratatui) for browsing and downloading atomic-forge tools
 - **`atomic-studio-runner`** — Pipeline interpreter + HTTP server backing the atomic-studio PWA
+- **`atomic-agent-runner`** — The pipeline interpreter as a wasm32-wasip2 component (WIT in `wit/world.wit`; `publish = false`)
+- **`atomic-agent-runner/host-tests`** — Runs the component under wasmtime and checks its sandbox
 
 ## Architecture
 
