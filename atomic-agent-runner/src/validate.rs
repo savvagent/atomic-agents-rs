@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::condition::parse;
+use crate::condition::{check_bounds, parse};
 use crate::spec::{
     Condition, MAX_FOREACH_ITEMS, MAX_MAX_RETRIES, MAX_MAX_TURNS, Pipeline, Step, StepKind,
 };
@@ -24,7 +24,7 @@ pub fn validate(p: &Pipeline) -> Result<(), Vec<String>> {
     if let Some(r) = p.max_retries
         && r > MAX_MAX_RETRIES
     {
-        errs.push(format!("/max_retries: must be at most {MAX_MAX_RETRIES}"));
+        errs.push(format!("/max_retries: must be in 0..={MAX_MAX_RETRIES}"));
     }
     let mut reserved: BTreeSet<String> = ["event", "state"].map(String::from).into();
     collect_as_names(&p.steps, &mut reserved);
@@ -100,10 +100,16 @@ impl Ctx {
         if !self.seen.insert(step.id.clone()) {
             self.err(&id_path, format!("duplicate id '{}'", step.id));
         }
-        if let Some(Condition::Expr(src)) = &step.when
-            && let Err(e) = parse(src)
-        {
+        let when_err = match &step.when {
+            Some(Condition::Expr(src)) => parse(src).err(),
+            Some(Condition::Structured(expr)) => check_bounds(expr).err(),
+            None => None,
+        };
+        if let Some(e) = when_err {
             self.err(&format!("{at}/when"), e);
+        }
+        if step.extras.contains_key("constraints") && !matches!(step.kind, StepKind::Act(_)) {
+            self.not_act(at);
         }
         match &step.kind {
             StepKind::Agent(a) => {
@@ -135,16 +141,8 @@ impl Ctx {
                         format!("invalid JSON Schema: {e}"),
                     );
                 }
-                if a.misplaced_constraints.is_some() {
-                    self.not_act(at);
-                }
             }
-            StepKind::Tool(t) => {
-                if t.misplaced_constraints.is_some() {
-                    self.not_act(at);
-                }
-            }
-            StepKind::Act(_) => {}
+            StepKind::Tool(_) | StepKind::Act(_) => {}
             StepKind::Foreach(f) => {
                 if nested {
                     self.err(at, "foreach cannot be nested inside another foreach");
@@ -160,9 +158,6 @@ impl Ctx {
                     if name == "event" || name == "state" {
                         self.err(&format!("{at}/as"), format!("'{name}' is reserved"));
                     }
-                }
-                if f.misplaced_constraints.is_some() {
-                    self.not_act(at);
                 }
                 self.steps(&f.steps, &format!("{at}/steps"), true);
             }
@@ -314,6 +309,54 @@ mod tests {
         let mut t = tool("a");
         t["when"] = json!({"op": "exists", "field": "x"});
         assert_eq!(check(pipe(vec![t])), Ok(()));
+    }
+
+    #[test]
+    fn act_constraints_accepted() {
+        let mut act = tool("c");
+        act["kind"] = json!("act");
+        act["constraints"] = json!({"n": {"lt": 1.0}});
+        assert_eq!(check(pipe(vec![act])), Ok(()));
+    }
+
+    #[test]
+    fn structured_conditions_are_bounded() {
+        let mut deep = json!({"op": "exists", "field": "a"});
+        for _ in 0..40 {
+            deep = json!({"op": "not", "condition": deep});
+        }
+        let mut t = tool("a");
+        t["when"] = deep;
+        assert!(has(&errs(pipe(vec![t])), "/steps/0/when"));
+        let mut t = tool("a");
+        t["when"] = json!({"op": "matches", "field": "x", "pattern": "("});
+        assert!(has(&errs(pipe(vec![t])), "/steps/0/when"));
+        let mut t = tool("a");
+        t["when"] = json!({"op": "matches", "field": "x", "pattern": "a".repeat(300)});
+        assert!(has(&errs(pipe(vec![t])), "/steps/0/when"));
+        let mut t = tool("a");
+        t["when"] = json!({"op": "in", "field": "x", "values": vec![1; 101]});
+        assert!(has(&errs(pipe(vec![t])), "/steps/0/when"));
+    }
+
+    #[test]
+    fn remote_ref_in_output_schema_is_never_fetched() {
+        // With the resolver features off, validation must fail fast (no network).
+        let mut a = agent("a");
+        a["output_schema"] = json!({"$ref": "https://example.invalid/schema.json"});
+        assert!(has(&errs(pipe(vec![a])), "/steps/0/output_schema"));
+    }
+
+    #[test]
+    fn max_retries_messages_are_consistent() {
+        let mut p = pipe(vec![]);
+        p["max_retries"] = json!(9);
+        let mut a = agent("a");
+        a["max_retries"] = json!(9);
+        let pe = errs(p).remove(0);
+        let ae = errs(pipe(vec![a])).remove(0);
+        assert!(pe.ends_with("must be in 0..=5"), "{pe}");
+        assert!(ae.ends_with("must be in 0..=5"), "{ae}");
     }
 
     #[test]

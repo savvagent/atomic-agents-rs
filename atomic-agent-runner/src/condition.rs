@@ -101,13 +101,7 @@ pub fn evaluate(expr: &ConditionExpr, data: &Value) -> Result<bool, ConditionErr
             .as_f64()
             .is_some_and(|n| n <= *value)),
         C::Matches { field, pattern } => match get_field(data, field)?.as_str() {
-            Some(s) => {
-                let re = regex_lite::Regex::new(pattern).map_err(|e| ConditionError::Regex {
-                    pattern: pattern.clone(),
-                    message: e.to_string(),
-                })?;
-                Ok(re.is_match(s))
-            }
+            Some(s) => Ok(compile_regex(pattern)?.is_match(s)),
             None => Ok(false),
         },
         C::In { field, values } => Ok(values.contains(get_field(data, field)?)),
@@ -141,6 +135,61 @@ fn get_field<'a>(data: &'a Value, field: &str) -> Result<&'a Value, ConditionErr
         ))),
         Some(Value::Null) => Err(ConditionError::Field(format!("field '{field}' is null"))),
         Some(v) => Ok(v),
+    }
+}
+
+/// Deepest allowed condition tree (a leaf alone has depth 1).
+pub const MAX_COND_DEPTH: usize = 32;
+/// Most nodes (leaves and combinators) in one condition tree.
+pub const MAX_COND_NODES: usize = 256;
+/// Most values in one `in` list.
+pub const MAX_IN_VALUES: usize = 100;
+/// Longest `matches` pattern, in bytes.
+pub const MAX_PATTERN_LEN: usize = 256;
+/// Compiled-regex size cap, so a hostile pattern cannot blow up memory.
+const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+fn compile_regex(pattern: &str) -> Result<regex_lite::Regex, ConditionError> {
+    regex_lite::RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|e| ConditionError::Regex {
+            pattern: pattern.to_string(),
+            message: e.to_string(),
+        })
+}
+
+/// Rejects trees that are too deep or large, `in` lists that are too long,
+/// and `matches` patterns that are too long or do not compile within the
+/// size limit. Applies to structured conditions and to [`parse`] output.
+pub fn check_bounds(expr: &ConditionExpr) -> Result<(), ConditionError> {
+    let mut nodes = 0;
+    bounds(expr, 1, &mut nodes)
+}
+
+fn bounds(expr: &ConditionExpr, depth: usize, nodes: &mut usize) -> Result<(), ConditionError> {
+    if depth > MAX_COND_DEPTH {
+        return perr(format!("condition nested deeper than {MAX_COND_DEPTH}"));
+    }
+    *nodes += 1;
+    if *nodes > MAX_COND_NODES {
+        return perr(format!("condition has more than {MAX_COND_NODES} nodes"));
+    }
+    match expr {
+        ConditionExpr::In { values, .. } if values.len() > MAX_IN_VALUES => {
+            perr(format!("'in' list has more than {MAX_IN_VALUES} values"))
+        }
+        ConditionExpr::Matches { pattern, .. } => {
+            if pattern.len() > MAX_PATTERN_LEN {
+                return perr(format!("pattern longer than {MAX_PATTERN_LEN} bytes"));
+            }
+            compile_regex(pattern).map(drop)
+        }
+        ConditionExpr::And { conditions } | ConditionExpr::Or { conditions } => conditions
+            .iter()
+            .try_for_each(|c| bounds(c, depth + 1, nodes)),
+        ConditionExpr::Not { condition } => bounds(condition, depth + 1, nodes),
+        _ => Ok(()),
     }
 }
 
@@ -465,16 +514,12 @@ impl Parser {
 }
 
 fn one_or(
-    mut parts: Vec<ConditionExpr>,
+    parts: Vec<ConditionExpr>,
     wrap: impl FnOnce(Vec<ConditionExpr>) -> ConditionExpr,
 ) -> ConditionExpr {
-    match parts.pop() {
-        Some(only) if parts.is_empty() => only,
-        Some(last) => {
-            parts.push(last);
-            wrap(parts)
-        }
-        None => wrap(parts),
+    match <[ConditionExpr; 1]>::try_from(parts) {
+        Ok([only]) => only,
+        Err(parts) => wrap(parts),
     }
 }
 
@@ -495,10 +540,11 @@ pub fn parse(src: &str) -> Result<ConditionExpr, ConditionError> {
         pos: 0,
     };
     let expr = p.or(0)?;
-    match p.peek() {
-        None => Ok(expr),
-        Some(t) => perr(format!("unexpected trailing {t:?}")),
+    if let Some(t) = p.peek() {
+        return perr(format!("unexpected trailing {t:?}"));
     }
+    check_bounds(&expr)?;
+    Ok(expr)
 }
 
 #[cfg(test)]
@@ -684,7 +730,7 @@ mod tests {
         assert_eq!(out, WhenOutcome::True);
         let out = when_holds(&Condition::Expr("!(decide.missing == 'x')".into()), &ctx).unwrap();
         assert!(matches!(out, WhenOutcome::FieldError(_)));
-        // errors propagate through && and || even when the other side decides it
+        // operands run left to right: an erroring first operand errors the whole `||`
         let out = when_holds(
             &Condition::Expr("decide.missing == 1 || decide.action == 'x'".into()),
             &ctx,
@@ -702,5 +748,88 @@ mod tests {
         assert!(matches!(t("a.n =="), Err(ConditionError::Parse(_))));
         let s = Condition::Structured(ConditionExpr::Exists { field: "a".into() });
         assert_eq!(when_holds(&s, &ctx), Ok(WhenOutcome::True));
+    }
+
+    #[test]
+    fn short_circuit_order_decides() {
+        let ctx = json!({"ok": "x"});
+        // the left operand already decides, so the missing field is never read
+        let t = |s: &str| when_holds(&Condition::Expr(s.into()), &ctx).unwrap();
+        assert_eq!(t("ok == 'x' || missing == 1"), WhenOutcome::True);
+        assert_eq!(t("ok == 'y' && missing == 1"), WhenOutcome::False);
+        assert!(matches!(
+            t("missing == 1 || ok == 'x'"),
+            WhenOutcome::FieldError(_)
+        ));
+    }
+
+    #[test]
+    fn bare_path_is_exists_so_not_missing_is_true() {
+        let ctx = json!({"decide": {"action": "x"}});
+        assert_eq!(ev("!decide.missing", &ctx), Ok(true));
+        assert_eq!(ev("decide.action", &ctx), Ok(true));
+    }
+
+    fn nested_not(depth: usize) -> ConditionExpr {
+        let mut e = ConditionExpr::Exists { field: "a".into() };
+        for _ in 0..depth {
+            e = ConditionExpr::Not {
+                condition: Box::new(e),
+            };
+        }
+        e
+    }
+
+    #[test]
+    fn bounds_depth_nodes_in_values_and_patterns() {
+        assert!(check_bounds(&nested_not(MAX_COND_DEPTH - 1)).is_ok());
+        assert!(check_bounds(&nested_not(MAX_COND_DEPTH + 1)).is_err());
+        let leaf = ConditionExpr::Exists { field: "a".into() };
+        let wide = |n| ConditionExpr::And {
+            conditions: vec![leaf.clone(); n],
+        };
+        assert!(check_bounds(&wide(MAX_COND_NODES - 1)).is_ok());
+        assert!(check_bounds(&wide(MAX_COND_NODES)).is_err());
+        let ins = |n| ConditionExpr::In {
+            field: "a".into(),
+            values: vec![json!(1); n],
+        };
+        assert!(check_bounds(&ins(MAX_IN_VALUES)).is_ok());
+        assert!(check_bounds(&ins(MAX_IN_VALUES + 1)).is_err());
+        let pat = |p: String| ConditionExpr::Matches {
+            field: "a".into(),
+            pattern: p,
+        };
+        assert!(check_bounds(&pat("a".repeat(MAX_PATTERN_LEN))).is_ok());
+        assert!(check_bounds(&pat("a".repeat(MAX_PATTERN_LEN + 1))).is_err());
+        assert!(matches!(
+            check_bounds(&pat("(".into())),
+            Err(ConditionError::Regex { .. })
+        ));
+        // a pattern that compiles but exceeds the compiled-size limit
+        assert!(check_bounds(&pat("((a{100}){100}){100}".into())).is_err());
+    }
+
+    #[test]
+    fn parser_output_is_bounded_too() {
+        let many = (0..=MAX_IN_VALUES)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse(&format!("a in [{many}]")).is_err());
+        let wide = vec!["a"; MAX_COND_NODES + 1].join(" && ");
+        assert!(parse(&wide).is_err());
+    }
+
+    #[test]
+    fn evaluate_rejects_oversized_regex_at_run_time() {
+        let e = ConditionExpr::Matches {
+            field: "s".into(),
+            pattern: "((a{100}){100}){100}".into(),
+        };
+        assert!(matches!(
+            evaluate(&e, &json!({"s": "a"})),
+            Err(ConditionError::Regex { .. })
+        ));
     }
 }

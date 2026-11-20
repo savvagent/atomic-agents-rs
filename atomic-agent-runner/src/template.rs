@@ -10,6 +10,14 @@ pub enum TemplateError {
     Unresolved(String),
 }
 
+/// Plain ASCII decimal, no sign, no leading zero (except `0` itself).
+fn array_index(seg: &str) -> Option<usize> {
+    let ok = !seg.is_empty()
+        && seg.bytes().all(|b| b.is_ascii_digit())
+        && (seg == "0" || !seg.starts_with('0'));
+    if ok { seg.parse().ok() } else { None }
+}
+
 /// Looks up a dotted path; segments index objects by key and arrays by
 /// decimal index. A present `null` is returned as `Some(&Value::Null)`.
 ///
@@ -27,7 +35,7 @@ pub fn lookup<'a>(ctx: &'a Value, path: &str) -> Option<&'a Value> {
     for seg in path.split('.') {
         cur = match cur {
             Value::Object(m) => m.get(seg)?,
-            Value::Array(a) => a.get(seg.parse::<usize>().ok()?)?,
+            Value::Array(a) => a.get(array_index(seg)?)?,
             _ => return None,
         };
     }
@@ -169,5 +177,10 @@ mod tests {
         assert_eq!(lookup(&ctx(), "event.tags.x"), None);
         assert_eq!(lookup(&ctx(), "event.n.deeper"), None);
         assert_eq!(lookup(&ctx(), ""), None);
+        // only plain ASCII decimal indexes without leading zeros
+        assert_eq!(lookup(&ctx(), "event.tags.0"), Some(&json!("a")));
+        assert_eq!(lookup(&ctx(), "event.tags.01"), None);
+        assert_eq!(lookup(&ctx(), "event.tags.+1"), None);
+        assert_eq!(lookup(&ctx(), "event.tags.\u{661}"), None);
     }
 }

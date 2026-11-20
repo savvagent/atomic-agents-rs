@@ -56,6 +56,11 @@ pub struct Step {
     /// Kind-specific body.
     #[serde(flatten)]
     pub kind: StepKind,
+    /// Keys no other field claimed. Kept so validation can reject a
+    /// `constraints` key on a non-act step, which serde would otherwise
+    /// drop silently; never serialized.
+    #[serde(flatten, default, skip_serializing)]
+    pub extras: Map<String, Value>,
 }
 
 /// The four step kinds, tagged by `kind`.
@@ -96,10 +101,6 @@ pub struct AgentStep {
     /// Extra model parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Map<String, Value>>,
-    /// Captures a misplaced `constraints` key so validation can reject it
-    /// (constraints belong on `act` steps only); never serialized.
-    #[serde(default, rename = "constraints", skip_serializing)]
-    pub misplaced_constraints: Option<Value>,
 }
 
 /// A single tool call.
@@ -109,9 +110,6 @@ pub struct ToolStep {
     pub tool: String,
     /// Arguments (templated).
     pub args: Value,
-    /// See [`AgentStep::misplaced_constraints`].
-    #[serde(default, rename = "constraints", skip_serializing)]
-    pub misplaced_constraints: Option<Value>,
 }
 
 /// A guarded tool call.
@@ -164,9 +162,6 @@ pub struct ForeachStep {
     pub max_items: u32,
     /// Steps run per item.
     pub steps: Vec<Step>,
-    /// See [`AgentStep::misplaced_constraints`].
-    #[serde(default, rename = "constraints", skip_serializing)]
-    pub misplaced_constraints: Option<Value>,
 }
 
 impl ForeachStep {
@@ -237,6 +232,20 @@ mod tests {
         assert_eq!(c.in_, Some(vec![json!(1), json!(2)]));
         assert_eq!(c.lte, Some(5.0));
         assert_eq!(c.max_length, Some(3));
+    }
+
+    #[test]
+    fn constraints_parse_on_act_and_land_in_extras_elsewhere() {
+        let p: Pipeline = serde_json::from_value(sample()).unwrap();
+        let StepKind::Act(a) = &p.steps[2].kind else {
+            panic!("not act")
+        };
+        assert!(a.constraints.is_some());
+        let t: Step = serde_json::from_value(
+            json!({"id": "t", "kind": "tool", "tool": "x", "args": {}, "constraints": {}}),
+        )
+        .unwrap();
+        assert!(t.extras.contains_key("constraints"));
     }
 
     #[test]
