@@ -201,8 +201,9 @@ impl LlmClient for AnthropicClient {
             }));
         }
 
+        let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
         let byte_stream = response.bytes_stream();
-        let stream = AnthropicSseStream::new(byte_stream);
+        let stream = AnthropicSseStream::new(byte_stream, has_tools);
         Ok(Box::pin(stream))
     }
 
@@ -214,34 +215,30 @@ impl LlmClient for AnthropicClient {
 /// Converts an Anthropic Messages API response body into a [`ChatResponse`].
 ///
 /// The request no longer forces a tool call, so the model may answer with a
-/// plain `text` block instead of a `tool_use` block; both are accepted and the
-/// last recognised block wins.
+/// plain `text` block instead of a `tool_use` block, or with both (a text
+/// preamble or epilogue around the call). A `tool_use` block's input wins
+/// whenever one is present; otherwise the text blocks are joined.
 fn parse_response(json: &serde_json::Value) -> Result<ChatResponse, Error> {
-    // Extract content from Anthropic response
-    // Anthropic returns content as an array of content blocks
-    let content = if let Some(content_blocks) = json.get("content") {
-        let mut result = String::new();
-        if let Some(blocks) = content_blocks.as_array() {
-            for block in blocks {
-                match block.get("type").and_then(|t| t.as_str()) {
-                    Some("tool_use") => {
-                        // Tool use block contains structured output
-                        if let Some(input) = block.get("input") {
-                            result = serde_json::to_string(input).unwrap_or_default();
-                        }
-                    }
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            result = text.to_string();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        result
-    } else {
-        String::new()
+    let blocks = json
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let is =
+        |b: &serde_json::Value, kind: &str| b.get("type").and_then(|t| t.as_str()) == Some(kind);
+
+    let tool_input = blocks
+        .iter()
+        .filter(|b| is(b, "tool_use"))
+        .find_map(|b| b.get("input"));
+
+    let content = match tool_input {
+        Some(input) => serde_json::to_string(input).unwrap_or_default(),
+        None => blocks
+            .iter()
+            .filter(|b| is(b, "text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect(),
     };
 
     let usage = json.get("usage").map(|u| Usage {
@@ -267,16 +264,26 @@ fn parse_response(json: &serde_json::Value) -> Result<ChatResponse, Error> {
 }
 
 /// Parses Anthropic's SSE stream format into ChatChunks.
+///
+/// The request no longer forces a tool call, so when tools are offered the
+/// model may write a text preamble before its `tool_use` block. Concatenating
+/// that text with the tool's `input_json_delta` fragments would produce
+/// invalid JSON, so with tools the stream holds text back: a `tool_use` block
+/// discards it and only the tool input is streamed, and a message that ends
+/// without one yields the held text once, on its final chunk. Without tools,
+/// text deltas stream as they arrive.
 struct AnthropicSseStream<S> {
     inner: S,
     buffer: String,
+    state: ToolStreamState,
 }
 
 impl<S> AnthropicSseStream<S> {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, has_tools: bool) -> Self {
         Self {
             inner,
             buffer: String::new(),
+            state: ToolStreamState::new(has_tools),
         }
     }
 }
@@ -294,8 +301,10 @@ where
         let this = self.get_mut();
 
         loop {
-            if let Some(chunk) = parse_anthropic_sse(&mut this.buffer) {
-                return std::task::Poll::Ready(Some(Ok(chunk)));
+            while let Some(event) = next_anthropic_event(&mut this.buffer) {
+                if let Some(chunk) = this.state.on_event(event) {
+                    return std::task::Poll::Ready(Some(Ok(chunk)));
+                }
             }
 
             let inner = Pin::new(&mut this.inner);
@@ -307,10 +316,12 @@ where
                     return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
-                    if let Some(chunk) = parse_anthropic_sse(&mut this.buffer) {
-                        return std::task::Poll::Ready(Some(Ok(chunk)));
+                    // A last event without its trailing blank line.
+                    if !this.buffer.trim().is_empty() {
+                        this.buffer.push_str("\n\n");
+                        continue;
                     }
-                    return std::task::Poll::Ready(None);
+                    return std::task::Poll::Ready(this.state.finish().map(Ok));
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             }
@@ -318,7 +329,81 @@ where
     }
 }
 
-fn parse_anthropic_sse(buffer: &mut String) -> Option<ChatChunk> {
+/// The parts of an Anthropic stream event the client acts on.
+#[derive(Debug, PartialEq)]
+enum AnthropicEvent {
+    Text(String),
+    ToolJson(String),
+    ToolUseStart,
+    Stop(String),
+}
+
+/// Applies the hold-text-while-tools-are-offered rule to stream events.
+#[derive(Debug)]
+struct ToolStreamState {
+    has_tools: bool,
+    held_text: String,
+    saw_tool_use: bool,
+    done: bool,
+}
+
+impl ToolStreamState {
+    fn new(has_tools: bool) -> Self {
+        Self {
+            has_tools,
+            held_text: String::new(),
+            saw_tool_use: false,
+            done: false,
+        }
+    }
+
+    fn on_event(&mut self, event: AnthropicEvent) -> Option<ChatChunk> {
+        let chunk = |delta: String, finish_reason: Option<String>| {
+            Some(ChatChunk {
+                delta,
+                finish_reason,
+            })
+        };
+        match event {
+            AnthropicEvent::Text(text) if !self.has_tools => chunk(text, None),
+            AnthropicEvent::Text(text) => {
+                if !self.saw_tool_use {
+                    self.held_text.push_str(&text);
+                }
+                None
+            }
+            AnthropicEvent::ToolUseStart => {
+                self.saw_tool_use = true;
+                self.held_text.clear();
+                None
+            }
+            AnthropicEvent::ToolJson(json) => chunk(json, None),
+            AnthropicEvent::Stop(reason) => {
+                self.done = true;
+                chunk(std::mem::take(&mut self.held_text), Some(reason))
+            }
+        }
+    }
+
+    /// Called when the byte stream ends: yields any text still held back
+    /// (a stream cut off before its stop events).
+    fn finish(&mut self) -> Option<ChatChunk> {
+        if self.held_text.is_empty() {
+            return None;
+        }
+        Some(ChatChunk {
+            delta: std::mem::take(&mut self.held_text),
+            finish_reason: if self.done {
+                None
+            } else {
+                Some("end_turn".to_string())
+            },
+        })
+    }
+}
+
+/// Takes the next complete event off `buffer` that the client acts on.
+fn next_anthropic_event(buffer: &mut String) -> Option<AnthropicEvent> {
     loop {
         let newline_pos = buffer.find("\n\n")?;
         let event_str = buffer[..newline_pos].to_string();
@@ -335,58 +420,54 @@ fn parse_anthropic_sse(buffer: &mut String) -> Option<ChatChunk> {
             }
         }
 
-        // We need to own the strings before parsing
-        let event_type = event_type.to_string();
-        let data_str = data_str.to_string();
+        let json = serde_json::from_str::<serde_json::Value>(data_str).ok();
 
-        match event_type.as_str() {
-            "content_block_delta" => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data_str) {
-                    let delta = json.get("delta").unwrap_or(&serde_json::Value::Null);
-                    let content = match delta.get("type").and_then(|t| t.as_str()) {
-                        Some("text_delta") => delta
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        Some("input_json_delta") => delta
-                            .get("partial_json")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        _ => String::new(),
-                    };
-                    if !content.is_empty() {
-                        return Some(ChatChunk {
-                            delta: content,
-                            finish_reason: None,
-                        });
-                    }
+        match event_type {
+            "content_block_start" => {
+                let block_type = json
+                    .as_ref()
+                    .and_then(|j| j.get("content_block"))
+                    .and_then(|b| b.get("type"))
+                    .and_then(|t| t.as_str());
+                if block_type == Some("tool_use") {
+                    return Some(AnthropicEvent::ToolUseStart);
                 }
+            }
+            "content_block_delta" => {
+                let Some(delta) = json.as_ref().and_then(|j| j.get("delta")) else {
+                    continue;
+                };
+                let field = |name: &str| {
+                    delta
+                        .get(name)
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let event = match delta.get("type").and_then(|t| t.as_str()) {
+                    Some("text_delta") => AnthropicEvent::Text(field("text")),
+                    Some("input_json_delta") => AnthropicEvent::ToolJson(field("partial_json")),
+                    _ => continue,
+                };
+                if matches!(&event, AnthropicEvent::Text(t) | AnthropicEvent::ToolJson(t) if t.is_empty())
+                {
+                    continue;
+                }
+                return Some(event);
             }
             "message_delta" => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data_str) {
-                    let stop_reason = json
-                        .get("delta")
-                        .and_then(|d| d.get("stop_reason"))
-                        .and_then(|s| s.as_str())
-                        .map(String::from);
-                    if stop_reason.is_some() {
-                        return Some(ChatChunk {
-                            delta: String::new(),
-                            finish_reason: stop_reason,
-                        });
-                    }
+                let stop_reason = json
+                    .as_ref()
+                    .and_then(|j| j.get("delta"))
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|s| s.as_str());
+                if let Some(reason) = stop_reason {
+                    return Some(AnthropicEvent::Stop(reason.to_string()));
                 }
             }
-            "message_stop" => {
-                return Some(ChatChunk {
-                    delta: String::new(),
-                    finish_reason: Some("end_turn".to_string()),
-                });
-            }
+            "message_stop" => return Some(AnthropicEvent::Stop("end_turn".to_string())),
             _ => {
-                // Skip other event types (message_start, content_block_start, etc.)
+                // Skip other event types (message_start, ping, content_block_stop, etc.)
             }
         }
     }
@@ -456,5 +537,147 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(r.content, "{\"a\":1}");
+    }
+
+    #[test]
+    fn parse_prefers_tool_use_over_a_later_text_block() {
+        let r = parse_response(&json!({"content": [
+            {"type": "tool_use", "id": "t", "name": "answer", "input": {"a": 1}},
+            {"type": "text", "text": "Here is the answer."}
+        ]}))
+        .unwrap();
+        assert_eq!(r.content, "{\"a\":1}");
+    }
+
+    fn sse(events: &[(&str, serde_json::Value)]) -> String {
+        events
+            .iter()
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+            .collect()
+    }
+
+    fn text_delta(text: &str) -> (&'static str, serde_json::Value) {
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": text}}),
+        )
+    }
+
+    fn json_delta(partial: &str) -> (&'static str, serde_json::Value) {
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 1,
+                   "delta": {"type": "input_json_delta", "partial_json": partial}}),
+        )
+    }
+
+    fn end(stop_reason: &str) -> Vec<(&'static str, serde_json::Value)> {
+        vec![
+            (
+                "message_delta",
+                json!({"type": "message_delta", "delta": {"stop_reason": stop_reason}}),
+            ),
+            ("message_stop", json!({"type": "message_stop"})),
+        ]
+    }
+
+    /// Feeds `body` through the SSE parser in small pieces (so events split
+    /// across reads) and returns the concatenated deltas.
+    fn collect_stream(body: &str, has_tools: bool) -> String {
+        use futures::StreamExt;
+        let pieces: Vec<Result<Bytes, reqwest::Error>> = body
+            .as_bytes()
+            .chunks(7)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let stream = AnthropicSseStream::new(futures::stream::iter(pieces), has_tools);
+        futures::executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|c| c.unwrap().delta)
+            .collect()
+    }
+
+    #[test]
+    fn stream_with_tools_drops_a_text_preamble_before_tool_use() {
+        let mut events = vec![
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {"id": "m"}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "text", "text": ""}}),
+            ),
+            text_delta("Let me answer "),
+            text_delta("with the tool."),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 1,
+                       "content_block": {"type": "tool_use", "id": "t", "name": "answer", "input": {}}}),
+            ),
+            json_delta("{\"a\""),
+            json_delta(":1}"),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 1}),
+            ),
+        ];
+        events.extend(end("tool_use"));
+        let out = collect_stream(&sse(&events), true);
+        assert_eq!(out, "{\"a\":1}");
+        serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    }
+
+    #[test]
+    fn stream_with_tools_and_text_only_yields_the_text_once_at_the_end() {
+        let mut events = vec![
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "text", "text": ""}}),
+            ),
+            text_delta("{\"a\""),
+            text_delta(":1}"),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+        ];
+        events.extend(end("end_turn"));
+        assert_eq!(collect_stream(&sse(&events), true), "{\"a\":1}");
+    }
+
+    #[test]
+    fn stream_with_tools_flushes_held_text_when_the_stream_ends_early() {
+        let events = vec![text_delta("partial")];
+        assert_eq!(collect_stream(&sse(&events), true), "partial");
+    }
+
+    #[test]
+    fn stream_without_tools_streams_text_deltas_as_they_arrive() {
+        use futures::StreamExt;
+        let mut events = vec![text_delta("Hel"), text_delta("lo")];
+        events.extend(end("end_turn"));
+        let body = sse(&events);
+        let stream = AnthropicSseStream::new(
+            futures::stream::iter(vec![Ok::<_, reqwest::Error>(Bytes::from(body))]),
+            false,
+        );
+        let chunks: Vec<ChatChunk> = futures::executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(chunks[0].delta, "Hel");
+        assert_eq!(chunks[1].delta, "lo");
+        assert_eq!(
+            chunks.iter().map(|c| c.delta.as_str()).collect::<String>(),
+            "Hello"
+        );
     }
 }
