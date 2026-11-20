@@ -1,0 +1,25 @@
+[package]
+name = "atomic-agent-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Sandboxed pipeline runner for atomic-agents, built as a WebAssembly component"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+atomic-agents = { path = "../atomic-agents", default-features = false, features = ["guest"] }
+serde.workspace = true
+serde_json.workspace = true
+jsonschema = { version = "0.29", default-features = false }
+thiserror.workspace = true
+regex-lite = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "0.51"

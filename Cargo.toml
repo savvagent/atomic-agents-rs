@@ -6,6 +6,7 @@ members = [
     "atomic-assembler",
     "atomic-forge",
     "atomic-studio-runner",
+    "atomic-agent-runner",
 ]
 
 [workspace.package]

@@ -162,6 +162,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-agent-runner"
+version = "0.2.1"
+dependencies = [
+ "atomic-agents",
+ "jsonschema",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "atomic-agents"
 version = "0.2.1"
 dependencies = [
@@ -4145,6 +4158,7 @@ version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 dependencies = [
+ "bitflags",
  "wit-bindgen-rust-macro",
 ]
 
