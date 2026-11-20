@@ -147,8 +147,9 @@ impl Default for ArxivSearchConfig {
                 .with_title("ArxivSearch")
                 .with_description("Search arXiv for academic papers"),
             base_url: "https://export.arxiv.org/api/query".to_string(),
-            user_agent: "atomic-agents-arxiv-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
-                .to_string(),
+            user_agent:
+                "atomic-agents-arxiv-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
+                    .to_string(),
             timeout: Duration::from_secs(20),
         }
     }
@@ -450,7 +451,10 @@ mod tests {
         let j: ArxivSearchInput =
             serde_json::from_str(r#"{"queries":["a"],"sort_by":"lastUpdatedDate"}"#).unwrap();
         assert_eq!(j.sort_by, ArxivSortBy::LastUpdatedDate);
-        assert!(serde_json::from_str::<ArxivSearchInput>(r#"{"queries":["a"],"sort_by":"bogus"}"#).is_err());
+        assert!(
+            serde_json::from_str::<ArxivSearchInput>(r#"{"queries":["a"],"sort_by":"bogus"}"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -463,7 +467,10 @@ mod tests {
             ArxivSearchTool::build_search_query("diffusion model", Some("cs.CV")),
             "(all:diffusion model) AND cat:cs.CV"
         );
-        assert_eq!(ArxivSearchTool::build_search_query("au:smith", None), "au:smith");
+        assert_eq!(
+            ArxivSearchTool::build_search_query("au:smith", None),
+            "au:smith"
+        );
     }
 
     #[test]
@@ -538,7 +545,9 @@ mod tests {
     #[ignore = "requires network access"]
     async fn live_search() {
         let tool = ArxivSearchTool::new(ArxivSearchConfig::default());
-        let out = tool.run(input(vec!["retrieval augmented generation"])).unwrap();
+        let out = tool
+            .run(input(vec!["retrieval augmented generation"]))
+            .unwrap();
         assert!(!out.results.is_empty());
     }
 }

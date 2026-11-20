@@ -86,11 +86,7 @@ impl HookRegistry {
                     handler(data);
                 }));
                 if let Err(e) = result {
-                    tracing::warn!(
-                        event = event.as_str(),
-                        "Hook handler panicked: {:?}",
-                        e
-                    );
+                    tracing::warn!(event = event.as_str(), "Hook handler panicked: {:?}", e);
                 }
             }
         }
@@ -179,7 +175,12 @@ mod tests {
 
         registry.clear(Some(&HookEvent::ParseError));
         assert!(registry.handlers.get(&HookEvent::ParseError).is_none());
-        assert!(registry.handlers.get(&HookEvent::CompletionResponse).is_some());
+        assert!(
+            registry
+                .handlers
+                .get(&HookEvent::CompletionResponse)
+                .is_some()
+        );
     }
 
     #[test]

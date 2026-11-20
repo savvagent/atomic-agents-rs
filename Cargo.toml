@@ -6,7 +6,24 @@ members = [
     "atomic-assembler",
     "atomic-forge",
     "atomic-studio-runner",
+    "atomic-agent-runner",
+    "atomic-agent-runner/host-tests",
 ]
+# Everything but the host tests, which build wasm32-wasip2 components and so
+# need `rustup target add wasm32-wasip2`. A plain `cargo build` / `cargo test`
+# skips them; `cargo test --workspace` (or `-p atomic-agent-runner-host-tests`)
+# runs them.
+default-members = [
+    "atomic-agents",
+    "atomic-agents-macros",
+    "atomic-assembler",
+    "atomic-forge",
+    "atomic-studio-runner",
+    "atomic-agent-runner",
+]
+# A fixture guest built by the host tests for wasm32-wasip2; not a member so
+# `cargo build --workspace` never compiles it natively.
+exclude = ["atomic-agent-runner/host-tests/env-probe"]
 
 [workspace.package]
 version = "0.2.1"

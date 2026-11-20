@@ -6,7 +6,7 @@ use futures::stream::Stream;
 use reqwest::Client;
 
 use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
-use super::LlmClient;
+use super::{LlmClient, is_tool_choice_key};
 use crate::error::{ClientError, Error};
 
 /// Client for OpenAI-compatible chat completion APIs.
@@ -64,9 +64,15 @@ impl OpenAiClient {
             body["response_format"] = serde_json::to_value(fmt).unwrap();
         }
 
-        // Merge extra parameters
+        // Merge extra parameters. Keys that choose a tool are skipped, as in
+        // the other clients: the request's tools are what the agent sends,
+        // and a forced choice is rejected by current models.
         if let serde_json::Value::Object(map) = &mut body {
             for (k, v) in &request.extra {
+                if is_tool_choice_key(k) {
+                    tracing::warn!(key = %k, "extra parameter may not override tool choice; skipped");
+                    continue;
+                }
                 map.insert(k.clone(), v.clone());
             }
         }
@@ -78,10 +84,12 @@ impl OpenAiClient {
         let choice = response_json
             .get("choices")
             .and_then(|c| c.get(0))
-            .ok_or_else(|| Error::Client(ClientError::Api {
-                status: 0,
-                message: "No choices in response".to_string(),
-            }))?;
+            .ok_or_else(|| {
+                Error::Client(ClientError::Api {
+                    status: 0,
+                    message: "No choices in response".to_string(),
+                })
+            })?;
 
         let message = choice.get("message").ok_or_else(|| {
             Error::Client(ClientError::Api {
@@ -140,17 +148,20 @@ impl LlmClient for OpenAiClient {
             }));
         }
 
-        let response_json: serde_json::Value =
-            response.json().await.map_err(ClientError::Http)?;
+        let response_json: serde_json::Value = response.json().await.map_err(ClientError::Http)?;
 
         let content = Self::extract_content(&response_json)?;
 
         let usage = response_json.get("usage").map(|u| Usage {
-            prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64().map(|n| n as u32)),
+            prompt_tokens: u
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
             completion_tokens: u
                 .get("completion_tokens")
                 .and_then(|v| v.as_u64().map(|n| n as u32)),
-            total_tokens: u.get("total_tokens").and_then(|v| v.as_u64().map(|n| n as u32)),
+            total_tokens: u
+                .get("total_tokens")
+                .and_then(|v| v.as_u64().map(|n| n as u32)),
         });
 
         let finish_reason = response_json
@@ -243,13 +254,10 @@ where
             let inner = Pin::new(&mut this.inner);
             match inner.poll_next(cx) {
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    this.buffer
-                        .push_str(&String::from_utf8_lossy(&bytes));
+                    this.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(Error::Client(
-                        ClientError::Http(e),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
                     // Check for remaining data in buffer
@@ -318,5 +326,48 @@ fn parse_sse_event(buffer: &mut String) -> Option<ChatChunk> {
             }
         }
         // If we didn't return a chunk from this event, try the next one in the buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::types::{ChatMessage, FunctionDefinition, ToolDefinition};
+
+    fn request_with_tool() -> ChatRequest {
+        let mut request = ChatRequest::new(
+            "m",
+            vec![ChatMessage {
+                role: "user".into(),
+                content: serde_json::json!("hi"),
+            }],
+        );
+        request.tools = Some(vec![ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "answer".into(),
+                description: None,
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+            },
+        }]);
+        request
+    }
+
+    #[test]
+    fn extra_cannot_force_or_replace_tools() {
+        let client = OpenAiClient::new("k");
+        let mut request = request_with_tool();
+        request
+            .extra
+            .insert("tool_choice".into(), serde_json::json!("required"));
+        request.extra.insert("tools".into(), serde_json::json!([]));
+        request
+            .extra
+            .insert("temperature".into(), serde_json::json!(0.2));
+        let body = client.build_request_body(&request);
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert_eq!(body["tools"][0]["function"]["name"], "answer");
+        assert_eq!(body["temperature"], 0.2);
     }
 }

@@ -7,11 +7,7 @@
 
 use atomic_agents::prelude::*;
 
-async fn run_with_client(
-    client: impl LlmClient,
-    model: &str,
-    provider: &str,
-) -> Result<()> {
+async fn run_with_client(client: impl LlmClient, model: &str, provider: &str) -> Result<()> {
     let config = AgentConfig::new(client, model);
     let agent = AtomicAgent::<BasicChatInputSchema, BasicChatOutputSchema, _>::new(config);
 
@@ -49,8 +45,7 @@ async fn main() -> Result<()> {
 
     // Ollama (via OpenAI-compatible API)
     if std::env::var("USE_OLLAMA").is_ok() {
-        let client = OpenAiClient::new("ollama")
-            .with_base_url("http://localhost:11434/v1");
+        let client = OpenAiClient::new("ollama").with_base_url("http://localhost:11434/v1");
         run_with_client(client, "llama3", "Ollama").await?;
     }
 

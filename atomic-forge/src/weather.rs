@@ -217,8 +217,9 @@ impl Default for WeatherConfig {
                 .with_description("Current weather and forecast via Open-Meteo"),
             geocoding_url: "https://geocoding-api.open-meteo.com/v1/search".to_string(),
             forecast_url: "https://api.open-meteo.com/v1/forecast".to_string(),
-            user_agent: "atomic-agents-weather-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
-                .to_string(),
+            user_agent:
+                "atomic-agents-weather-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
+                    .to_string(),
             timeout: Duration::from_secs(15),
         }
     }
@@ -265,7 +266,10 @@ fn num_i64(v: Option<&Value>) -> Option<i64> {
 
 /// Value at `index` of an array stored under `key`.
 fn at<'a>(obj: &'a Value, key: &str, index: usize) -> Option<&'a Value> {
-    obj.get(key)?.as_array()?.get(index).filter(|v| !v.is_null())
+    obj.get(key)?
+        .as_array()?
+        .get(index)
+        .filter(|v| !v.is_null())
 }
 
 impl WeatherTool {
@@ -298,7 +302,9 @@ impl WeatherTool {
             let digits = s.strip_prefix('-').unwrap_or(s);
             let valid = !digits.is_empty()
                 && digits.split('.').count() <= 2
-                && digits.split('.').all(|p| p.bytes().all(|b| b.is_ascii_digit()))
+                && digits
+                    .split('.')
+                    .all(|p| p.bytes().all(|b| b.is_ascii_digit()))
                 && !digits.starts_with('.')
                 && !digits.ends_with('.');
             if valid { s.parse().ok() } else { None }
@@ -346,7 +352,9 @@ impl WeatherTool {
         if let Some(cc) = country_code {
             params.push(("countryCode", cc.to_ascii_uppercase()));
         }
-        let data = self.get_json(&self.geocoding_url, &params, "geocoding").await?;
+        let data = self
+            .get_json(&self.geocoding_url, &params, "geocoding")
+            .await?;
         Self::parse_geocode(&data, query)
     }
 
@@ -374,22 +382,41 @@ impl WeatherTool {
         }
         Ok(Place {
             name,
-            country: first.get("country").and_then(Value::as_str).map(String::from),
+            country: first
+                .get("country")
+                .and_then(Value::as_str)
+                .map(String::from),
             latitude,
             longitude,
         })
     }
 
-    async fn forecast(&self, place: &Place, input: &WeatherInput) -> std::result::Result<Value, String> {
+    async fn forecast(
+        &self,
+        place: &Place,
+        input: &WeatherInput,
+    ) -> std::result::Result<Value, String> {
         let metric = input.units == WeatherUnits::Metric;
         let mut params = vec![
             ("latitude", place.latitude.to_string()),
             ("longitude", place.longitude.to_string()),
             ("timezone", "auto".to_string()),
-            ("forecast_days", input.forecast_days.clamp(1, 16).to_string()),
-            ("temperature_unit", if metric { "celsius" } else { "fahrenheit" }.to_string()),
-            ("wind_speed_unit", if metric { "kmh" } else { "mph" }.to_string()),
-            ("precipitation_unit", if metric { "mm" } else { "inch" }.to_string()),
+            (
+                "forecast_days",
+                input.forecast_days.clamp(1, 16).to_string(),
+            ),
+            (
+                "temperature_unit",
+                if metric { "celsius" } else { "fahrenheit" }.to_string(),
+            ),
+            (
+                "wind_speed_unit",
+                if metric { "kmh" } else { "mph" }.to_string(),
+            ),
+            (
+                "precipitation_unit",
+                if metric { "mm" } else { "inch" }.to_string(),
+            ),
             (
                 "current",
                 "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,\
@@ -415,10 +442,16 @@ impl WeatherTool {
 
     /// Build the `current` block from a forecast response.
     pub fn build_current(data: &Value) -> Option<WeatherCurrent> {
-        let c = data.get("current").filter(|c| c.is_object() && !c.as_object().unwrap().is_empty())?;
+        let c = data
+            .get("current")
+            .filter(|c| c.is_object() && !c.as_object().unwrap().is_empty())?;
         let code = num_i64(c.get("weather_code"));
         Some(WeatherCurrent {
-            time: c.get("time").and_then(Value::as_str).unwrap_or("").to_string(),
+            time: c
+                .get("time")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             temperature: num_f64(c.get("temperature_2m")),
             apparent_temperature: num_f64(c.get("apparent_temperature")),
             humidity: num_i64(c.get("relative_humidity_2m")),
@@ -436,7 +469,11 @@ impl WeatherTool {
         let Some(daily) = data.get("daily") else {
             return Vec::new();
         };
-        let dates = daily.get("time").and_then(Value::as_array).cloned().unwrap_or_default();
+        let dates = daily
+            .get("time")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         dates
             .iter()
             .enumerate()
@@ -450,7 +487,11 @@ impl WeatherTool {
                     apparent_temperature_max: num_f64(at(daily, "apparent_temperature_max", i)),
                     apparent_temperature_min: num_f64(at(daily, "apparent_temperature_min", i)),
                     precipitation_sum: num_f64(at(daily, "precipitation_sum", i)),
-                    precipitation_probability_max: num_i64(at(daily, "precipitation_probability_max", i)),
+                    precipitation_probability_max: num_i64(at(
+                        daily,
+                        "precipitation_probability_max",
+                        i,
+                    )),
                     weather_code: code,
                     weather_description: describe_weather_code(code),
                     sunrise: text("sunrise"),
@@ -466,7 +507,11 @@ impl WeatherTool {
         let Some(hourly) = data.get("hourly") else {
             return Vec::new();
         };
-        let times = hourly.get("time").and_then(Value::as_array).cloned().unwrap_or_default();
+        let times = hourly
+            .get("time")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         times
             .iter()
             .enumerate()
@@ -506,16 +551,28 @@ impl WeatherTool {
         let data = self.forecast(&place, input).await?;
         let metric = input.units == WeatherUnits::Metric;
         let units = BTreeMap::from([
-            ("temperature".to_string(), if metric { "°C" } else { "°F" }.to_string()),
-            ("wind_speed".to_string(), if metric { "km/h" } else { "mph" }.to_string()),
-            ("precipitation".to_string(), if metric { "mm" } else { "in" }.to_string()),
+            (
+                "temperature".to_string(),
+                if metric { "°C" } else { "°F" }.to_string(),
+            ),
+            (
+                "wind_speed".to_string(),
+                if metric { "km/h" } else { "mph" }.to_string(),
+            ),
+            (
+                "precipitation".to_string(),
+                if metric { "mm" } else { "in" }.to_string(),
+            ),
         ]);
         Ok(WeatherOutput {
             location_name: place.name,
             country: place.country,
             latitude: place.latitude,
             longitude: place.longitude,
-            timezone: data.get("timezone").and_then(Value::as_str).map(String::from),
+            timezone: data
+                .get("timezone")
+                .and_then(Value::as_str)
+                .map(String::from),
             units,
             current: Self::build_current(&data),
             daily: Self::build_daily(&data),
@@ -616,8 +673,14 @@ mod tests {
 
     #[test]
     fn latlon_parsing() {
-        assert_eq!(WeatherTool::parse_latlon("48.8566,2.3522"), Some((48.8566, 2.3522)));
-        assert_eq!(WeatherTool::parse_latlon(" -33.9 , 151.2 "), Some((-33.9, 151.2)));
+        assert_eq!(
+            WeatherTool::parse_latlon("48.8566,2.3522"),
+            Some((48.8566, 2.3522))
+        );
+        assert_eq!(
+            WeatherTool::parse_latlon(" -33.9 , 151.2 "),
+            Some((-33.9, 151.2))
+        );
         assert_eq!(WeatherTool::parse_latlon("91,0"), None);
         assert_eq!(WeatherTool::parse_latlon("0,181"), None);
         assert_eq!(WeatherTool::parse_latlon("Springfield, IL"), None);
@@ -627,7 +690,10 @@ mod tests {
 
     #[test]
     fn weather_codes() {
-        assert_eq!(describe_weather_code(Some(95)).as_deref(), Some("Thunderstorm"));
+        assert_eq!(
+            describe_weather_code(Some(95)).as_deref(),
+            Some("Thunderstorm")
+        );
         assert_eq!(describe_weather_code(Some(42)).as_deref(), Some("Code 42"));
     }
 
@@ -658,7 +724,11 @@ mod tests {
         let place = WeatherTool::parse_geocode(&data, "Springfield").unwrap();
         assert_eq!(place.name, "Springfield, Illinois");
         assert_eq!(place.country.as_deref(), Some("United States"));
-        assert!(WeatherTool::parse_geocode(&json!({}), "Nowhere").unwrap_err().contains("not found"));
+        assert!(
+            WeatherTool::parse_geocode(&json!({}), "Nowhere")
+                .unwrap_err()
+                .contains("not found")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

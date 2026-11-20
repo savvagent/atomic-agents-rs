@@ -61,11 +61,8 @@ impl Screen for MainMenuScreen {
         // Title
         let title = Paragraph::new(vec![
             Line::from(""),
-            Line::from(
-                "  ⚛  Atomic Assembler"
-                    .to_string(),
-            )
-            .style(Style::default().fg(Color::Magenta).bold()),
+            Line::from("  ⚛  Atomic Assembler".to_string())
+                .style(Style::default().fg(Color::Magenta).bold()),
             Line::from(""),
         ])
         .block(Block::default().borders(Borders::BOTTOM));
@@ -86,13 +83,12 @@ impl Screen for MainMenuScreen {
             })
             .collect();
 
-        let menu = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Menu ")
-                    .border_style(Style::default().fg(Color::Magenta)),
-            );
+        let menu = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Menu ")
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
         frame.render_widget(menu, chunks[1]);
 
         // Help bar

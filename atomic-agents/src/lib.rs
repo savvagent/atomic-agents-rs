@@ -34,6 +34,9 @@ pub mod agent;
 pub mod chat_history;
 pub mod client;
 pub mod error;
+#[cfg(feature = "guest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "guest")))]
+pub mod guest;
 #[cfg(feature = "mcp")]
 #[cfg_attr(docsrs, doc(cfg(feature = "mcp")))]
 pub mod mcp;

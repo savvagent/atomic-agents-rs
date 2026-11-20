@@ -124,8 +124,7 @@ impl Screen for ToolExplorerScreen {
                 .style(Style::default().fg(Color::Yellow));
             frame.render_widget(loading, chunks[1]);
         } else if self.tools.is_empty() {
-            let empty = Paragraph::new("  No tools found.")
-                .style(Style::default().fg(Color::Red));
+            let empty = Paragraph::new("  No tools found.").style(Style::default().fg(Color::Red));
             frame.render_widget(empty, chunks[1]);
         } else {
             let items: Vec<ListItem> = self
@@ -133,7 +132,11 @@ impl Screen for ToolExplorerScreen {
                 .iter()
                 .enumerate()
                 .map(|(i, tool)| {
-                    let prefix = if i == self.selected { "▸ 🔧 " } else { "  🔧 " };
+                    let prefix = if i == self.selected {
+                        "▸ 🔧 "
+                    } else {
+                        "  🔧 "
+                    };
                     let style = if i == self.selected {
                         Style::default().fg(Color::Yellow).bold()
                     } else {

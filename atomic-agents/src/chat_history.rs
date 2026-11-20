@@ -41,24 +41,14 @@ pub enum ContentPart {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "image_url")]
-    ImageUrl {
-        image_url: ImageUrlContent,
-    },
+    ImageUrl { image_url: ImageUrlContent },
     #[serde(rename = "image_base64")]
-    ImageBase64 {
-        data: String,
-        media_type: String,
-    },
+    ImageBase64 { data: String, media_type: String },
     #[serde(rename = "audio_base64")]
-    AudioBase64 {
-        data: String,
-        media_type: String,
-    },
+    AudioBase64 { data: String, media_type: String },
     /// A video reference sent as an OpenAI-compatible `video_url` content part.
     #[serde(rename = "video_url")]
-    VideoUrl {
-        video_url: VideoUrlContent,
-    },
+    VideoUrl { video_url: VideoUrlContent },
 }
 
 /// Video reference for providers that accept `video_url` content parts
@@ -225,9 +215,8 @@ impl ChatHistory {
     /// is empty (matching upstream `delete_turn_id`). Later messages are then
     /// never filed under the deleted, orphaned ID.
     pub fn delete_turn(&mut self, turn_id: &str) {
-        self.history.retain(|msg| {
-            msg.turn_id.as_deref() != Some(turn_id)
-        });
+        self.history
+            .retain(|msg| msg.turn_id.as_deref() != Some(turn_id));
         if self.current_turn_id.as_deref() == Some(turn_id) {
             self.current_turn_id = self.history.last().and_then(|m| m.turn_id.clone());
         }
@@ -422,17 +411,17 @@ mod tests {
             chat_message: "test".to_string(),
         };
         history.add_message(Role::User, &input);
-        assert_eq!(history.messages()[0].turn_id.as_deref(), Some(turn_id.as_str()));
+        assert_eq!(
+            history.messages()[0].turn_id.as_deref(),
+            Some(turn_id.as_str())
+        );
     }
 
     #[test]
     fn test_max_messages_overflow() {
         let mut history = ChatHistory::new(Some(2));
         for i in 0..5 {
-            history.add_raw_message(
-                Role::User,
-                MessageContent::text(format!("msg {i}")),
-            );
+            history.add_raw_message(Role::User, MessageContent::text(format!("msg {i}")));
         }
         assert_eq!(history.message_count(), 2);
         // Should have the last 2 messages
@@ -546,7 +535,10 @@ mod tests {
         history.delete_turn(&second);
         assert_eq!(history.current_turn_id(), Some(first.as_str()));
         history.add_raw_message(Role::User, MessageContent::text("c"));
-        assert_eq!(history.messages()[1].turn_id.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            history.messages()[1].turn_id.as_deref(),
+            Some(first.as_str())
+        );
 
         // Deleting a non-current turn leaves the current ID alone.
         let third = history.initialize_turn();

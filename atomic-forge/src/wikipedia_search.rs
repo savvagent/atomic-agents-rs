@@ -78,8 +78,9 @@ impl Default for WikipediaSearchConfig {
                 .with_title("WikipediaSearch")
                 .with_description("Search Wikipedia articles"),
             base_url_template: "https://{lang}.wikipedia.org".to_string(),
-            user_agent: "atomic-agents-wikipedia-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
-                .to_string(),
+            user_agent:
+                "atomic-agents-wikipedia-tool/1.0 (+https://github.com/savvagent/atomic-agents-rs)"
+                    .to_string(),
             timeout: Duration::from_secs(15),
         }
     }
@@ -277,7 +278,13 @@ impl WikipediaSearchTool {
         let page_url = summary["content_urls"]["desktop"]["page"]
             .as_str()
             .map(String::from)
-            .unwrap_or_else(|| format!("{}/wiki/{}", self.api_base(language), title.replace(' ', "_")));
+            .unwrap_or_else(|| {
+                format!(
+                    "{}/wiki/{}",
+                    self.api_base(language),
+                    title.replace(' ', "_")
+                )
+            });
         WikipediaArticle {
             query: query.to_string(),
             title: summary
@@ -492,7 +499,10 @@ mod tests {
         let mut i = input(&["rust"]);
         i.full_text = true;
         let out = tool.run(i).unwrap();
-        assert_eq!(out.results[0].full_text.as_deref(), Some("Full article body."));
+        assert_eq!(
+            out.results[0].full_text.as_deref(),
+            Some("Full article body.")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

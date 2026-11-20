@@ -6,7 +6,7 @@ use futures::stream::Stream;
 use reqwest::Client;
 
 use super::types::{ChatChunk, ChatRequest, ChatResponse, Usage};
-use super::LlmClient;
+use super::{LlmClient, is_tool_choice_key};
 use crate::error::{ClientError, Error};
 
 /// Client for Google Gemini (Generative Language API).
@@ -76,12 +76,6 @@ impl GoogleClient {
             "contents": contents,
         });
 
-        if let Some(sys) = system_instruction {
-            body["systemInstruction"] = serde_json::json!({
-                "parts": [{"text": sys}]
-            });
-        }
-
         // Convert tools to Gemini format
         if let Some(tools) = &request.tools {
             let function_declarations: Vec<serde_json::Value> = tools
@@ -100,10 +94,32 @@ impl GoogleClient {
             body["tools"] = serde_json::json!([{
                 "functionDeclarations": function_declarations,
             }]);
+            // Forcing a call (`ANY`) is avoided for the same reason as on the
+            // Anthropic client: let the model choose and instruct it in the
+            // system instruction to answer through the function.
             body["toolConfig"] = serde_json::json!({
                 "functionCallingConfig": {
-                    "mode": "ANY"
+                    "mode": "AUTO"
                 }
+            });
+            // Agents send exactly one tool, the output schema, so naming the
+            // first function names the extraction function.
+            if let Some(first) = tools.first() {
+                let mut sys = system_instruction.take().unwrap_or_default();
+                if !sys.is_empty() {
+                    sys.push_str("\n\n");
+                }
+                sys.push_str(&format!(
+                    "Respond by calling the `{}` function.",
+                    first.function.name
+                ));
+                system_instruction = Some(sys);
+            }
+        }
+
+        if let Some(sys) = system_instruction {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": sys}]
             });
         }
 
@@ -111,9 +127,14 @@ impl GoogleClient {
         let mut generation_config = serde_json::json!({});
         for (k, v) in &request.extra {
             match k.as_str() {
-                "temperature" | "top_p" | "top_k" | "max_output_tokens"
-                | "candidate_count" | "stop_sequences" => {
+                "temperature" | "top_p" | "top_k" | "max_output_tokens" | "candidate_count"
+                | "stop_sequences" => {
                     generation_config[k] = v.clone();
+                }
+                // `toolConfig` would let `extra` force a call (`ANY`), which
+                // this client avoids; `tools` would replace the declarations.
+                key if is_tool_choice_key(key) => {
+                    tracing::warn!(key, "extra parameter may not override tool choice; skipped");
                 }
                 _ => {
                     body[k] = v.clone();
@@ -133,10 +154,7 @@ impl GoogleClient {
         } else {
             "generateContent"
         };
-        format!(
-            "{}/models/{}:{}",
-            self.base_url, model, method
-        )
+        format!("{}/models/{}:{}", self.base_url, model, method)
     }
 }
 
@@ -176,8 +194,7 @@ impl LlmClient for GoogleClient {
             }));
         }
 
-        let response_json: serde_json::Value =
-            response.json().await.map_err(ClientError::Http)?;
+        let response_json: serde_json::Value = response.json().await.map_err(ClientError::Http)?;
 
         // Extract content from Gemini response
         let content = extract_gemini_content(&response_json);
@@ -194,12 +211,7 @@ impl LlmClient for GoogleClient {
                 .and_then(|v| v.as_u64().map(|n| n as u32)),
         });
 
-        let finish_reason = response_json
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("finishReason"))
-            .and_then(|f| f.as_str())
-            .map(String::from);
+        let finish_reason = gemini_finish_reason(&response_json);
 
         Ok(ChatResponse {
             content,
@@ -237,8 +249,9 @@ impl LlmClient for GoogleClient {
             }));
         }
 
+        let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
         let byte_stream = response.bytes_stream();
-        let stream = GeminiSseStream::new(byte_stream);
+        let stream = GeminiSseStream::new(byte_stream, has_tools);
         Ok(Box::pin(stream))
     }
 
@@ -255,44 +268,115 @@ impl LlmClient for GoogleClient {
     }
 }
 
-fn extract_gemini_content(response: &serde_json::Value) -> String {
-    let candidate = response
-        .get("candidates")
-        .and_then(|c| c.get(0));
-
-    let parts = candidate
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.as_array());
-
-    if let Some(parts) = parts {
-        for part in parts {
-            // Check for function call (tool use)
-            if let Some(fc) = part.get("functionCall") {
-                if let Some(args) = fc.get("args") {
-                    return serde_json::to_string(args).unwrap_or_default();
-                }
-            }
-            // Text content
-            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                return text.to_string();
-            }
-        }
-    }
-    String::new()
+/// The answer-bearing parts of one Gemini response (or stream chunk).
+struct GeminiParts {
+    /// The first `functionCall`'s arguments, serialized.
+    call_args: Option<String>,
+    /// Every `text` part, joined.
+    text: String,
 }
 
+fn gemini_parts(response: &serde_json::Value) -> GeminiParts {
+    let parts = response
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    GeminiParts {
+        call_args: parts
+            .iter()
+            .find_map(|p| p.get("functionCall").and_then(|fc| fc.get("args")))
+            .map(|args| serde_json::to_string(args).unwrap_or_default()),
+        text: parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect(),
+    }
+}
+
+/// Extracts a response's content. The request no longer forces a function
+/// call, so the model may answer in text, or with text around a call; a
+/// `functionCall`'s arguments win whenever one is present.
+fn extract_gemini_content(response: &serde_json::Value) -> String {
+    let parts = gemini_parts(response);
+    parts.call_args.unwrap_or(parts.text)
+}
+
+fn gemini_finish_reason(json: &serde_json::Value) -> Option<String> {
+    json.get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finishReason"))
+        .and_then(|f| f.as_str())
+        .map(String::from)
+}
+
+/// Parses Gemini's SSE stream into ChatChunks.
+///
+/// With tools offered, text is held back rather than streamed: a
+/// `functionCall` discards it and only the call's arguments are emitted, and
+/// a response that finishes without one yields the held text on its final
+/// chunk. Without tools, text streams as it arrives.
 struct GeminiSseStream<S> {
     inner: S,
     buffer: String,
+    has_tools: bool,
+    held_text: String,
+    saw_call: bool,
+    /// Set once `inner` has ended; the stream then only returns `None`, so
+    /// `inner` is never polled after it finished.
+    finished: bool,
 }
 
 impl<S> GeminiSseStream<S> {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, has_tools: bool) -> Self {
         Self {
             inner,
             buffer: String::new(),
+            has_tools,
+            held_text: String::new(),
+            saw_call: false,
+            finished: false,
         }
+    }
+
+    fn on_response(&mut self, json: &serde_json::Value) -> Option<ChatChunk> {
+        let GeminiParts { call_args, text } = gemini_parts(json);
+        let finish_reason = gemini_finish_reason(json);
+
+        let delta = if !self.has_tools {
+            call_args.unwrap_or(text)
+        } else if let Some(args) = call_args {
+            self.saw_call = true;
+            self.held_text.clear();
+            args
+        } else {
+            if !self.saw_call {
+                self.held_text.push_str(&text);
+            }
+            if finish_reason.is_some() {
+                std::mem::take(&mut self.held_text)
+            } else {
+                String::new()
+            }
+        };
+
+        (!delta.is_empty() || finish_reason.is_some()).then_some(ChatChunk {
+            delta,
+            finish_reason,
+        })
+    }
+
+    /// Called when the byte stream ends: yields any text still held back
+    /// (a stream cut off before its finishing chunk).
+    fn finish(&mut self) -> Option<ChatChunk> {
+        (!self.held_text.is_empty()).then(|| ChatChunk {
+            delta: std::mem::take(&mut self.held_text),
+            finish_reason: Some("STOP".to_string()),
+        })
     }
 }
 
@@ -307,10 +391,15 @@ where
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.finished {
+            return std::task::Poll::Ready(None);
+        }
 
         loop {
-            if let Some(chunk) = parse_gemini_sse(&mut this.buffer) {
-                return std::task::Poll::Ready(Some(Ok(chunk)));
+            while let Some(json) = next_gemini_event(&mut this.buffer) {
+                if let Some(chunk) = this.on_response(&json) {
+                    return std::task::Poll::Ready(Some(Ok(chunk)));
+                }
             }
 
             let inner = Pin::new(&mut this.inner);
@@ -319,15 +408,16 @@ where
                     this.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(Error::Client(
-                        ClientError::Http(e),
-                    ))));
+                    return std::task::Poll::Ready(Some(Err(Error::Client(ClientError::Http(e)))));
                 }
                 std::task::Poll::Ready(None) => {
-                    if let Some(chunk) = parse_gemini_sse(&mut this.buffer) {
-                        return std::task::Poll::Ready(Some(Ok(chunk)));
+                    // A last event without its trailing blank line.
+                    if !this.buffer.trim().is_empty() {
+                        this.buffer.push_str("\n\n");
+                        continue;
                     }
-                    return std::task::Poll::Ready(None);
+                    this.finished = true;
+                    return std::task::Poll::Ready(this.finish().map(Ok));
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             }
@@ -335,32 +425,211 @@ where
     }
 }
 
-fn parse_gemini_sse(buffer: &mut String) -> Option<ChatChunk> {
+/// Takes the next complete SSE event off `buffer` and returns its JSON data.
+fn next_gemini_event(buffer: &mut String) -> Option<serde_json::Value> {
     loop {
         let newline_pos = buffer.find("\n\n")?;
         let event_str = buffer[..newline_pos].to_string();
         *buffer = buffer[newline_pos + 2..].to_string();
 
-        for line in event_str.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                let data = data.trim();
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                    let content = extract_gemini_content(&json);
-                    let finish_reason = json
-                        .get("candidates")
-                        .and_then(|c| c.get(0))
-                        .and_then(|c| c.get("finishReason"))
-                        .and_then(|f| f.as_str())
-                        .map(String::from);
-
-                    if !content.is_empty() || finish_reason.is_some() {
-                        return Some(ChatChunk {
-                            delta: content,
-                            finish_reason,
-                        });
-                    }
-                }
-            }
+        let json = event_str
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find_map(|data| serde_json::from_str::<serde_json::Value>(data.trim()).ok());
+        if json.is_some() {
+            return json;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::types::{ChatMessage, FunctionDefinition, ToolDefinition};
+    use serde_json::json;
+
+    fn request(with_system: bool, with_tool: bool) -> ChatRequest {
+        let mut messages = Vec::new();
+        if with_system {
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: json!("You are helpful."),
+            });
+        }
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: json!("Hi"),
+        });
+        let mut req = ChatRequest::new("gemini-2.5-flash", messages);
+        if with_tool {
+            req.tools = Some(vec![ToolDefinition {
+                tool_type: "function".into(),
+                function: FunctionDefinition {
+                    name: "answer".into(),
+                    description: None,
+                    parameters: json!({"type": "object"}),
+                    strict: None,
+                },
+            }]);
+        }
+        req
+    }
+
+    fn system_text(body: &serde_json::Value) -> &str {
+        body["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[test]
+    fn tool_request_uses_auto_mode_and_names_the_function() {
+        let body = GoogleClient::new("k").build_request_body(&request(true, true));
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+        assert!(!body.to_string().contains("\"ANY\""));
+        let system = system_text(&body);
+        assert!(system.starts_with("You are helpful."));
+        assert!(system.ends_with("Respond by calling the `answer` function."));
+    }
+
+    #[test]
+    fn tool_request_without_system_message_still_names_the_function() {
+        let body = GoogleClient::new("k").build_request_body(&request(false, true));
+        assert_eq!(
+            system_text(&body),
+            "Respond by calling the `answer` function."
+        );
+    }
+
+    #[test]
+    fn request_without_tools_has_no_tool_config_and_unchanged_system() {
+        let body = GoogleClient::new("k").build_request_body(&request(true, false));
+        assert!(body.get("toolConfig").is_none());
+        assert_eq!(system_text(&body), "You are helpful.");
+    }
+
+    #[test]
+    fn extra_cannot_override_tool_config_or_tools() {
+        let mut req = request(true, true);
+        req.extra.insert(
+            "toolConfig".into(),
+            json!({"functionCallingConfig": {"mode": "ANY"}}),
+        );
+        req.extra.insert(
+            "tool_config".into(),
+            json!({"function_calling_config": {"mode": "ANY"}}),
+        );
+        req.extra.insert("tool_choice".into(), json!("any"));
+        req.extra.insert("tools".into(), json!([]));
+        req.extra.insert("temperature".into(), json!(0.3));
+        let body = GoogleClient::new("k").build_request_body(&req);
+        assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+        assert!(!body.to_string().contains("\"ANY\""), "{body}");
+        assert!(body.get("tool_config").is_none() && body.get("tool_choice").is_none());
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            "answer"
+        );
+        assert_eq!(body["generationConfig"]["temperature"], json!(0.3));
+    }
+
+    #[test]
+    fn stream_is_fused_after_the_inner_stream_ends() {
+        use futures::StreamExt;
+        let body = format!("data: {}\n\n", chunk(json!([{"text": "partial"}]), None));
+        let stream = GeminiSseStream::new(
+            crate::client::test_support::PanicAfterEnd::new(vec![Bytes::from(body)]),
+            true,
+        );
+        futures::executor::block_on(async {
+            let mut stream = stream;
+            assert_eq!(stream.next().await.unwrap().unwrap().delta, "partial");
+            assert!(stream.next().await.is_none());
+            assert!(stream.next().await.is_none());
+        });
+    }
+
+    fn response(parts: serde_json::Value) -> serde_json::Value {
+        json!({"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}]})
+    }
+
+    #[test]
+    fn parses_text_only_response() {
+        let r = response(json!([{"text": "{\"a\":"}, {"text": "1}"}]));
+        assert_eq!(extract_gemini_content(&r), "{\"a\":1}");
+    }
+
+    #[test]
+    fn parse_prefers_function_call_over_a_text_preamble() {
+        let r = response(json!([
+            {"text": "Calling the function."},
+            {"functionCall": {"name": "answer", "args": {"a": 1}}}
+        ]));
+        assert_eq!(extract_gemini_content(&r), "{\"a\":1}");
+    }
+
+    fn collect_stream(events: &[serde_json::Value], has_tools: bool) -> String {
+        use futures::StreamExt;
+        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+        let pieces: Vec<Result<Bytes, reqwest::Error>> = body
+            .as_bytes()
+            .chunks(7)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        let stream = GeminiSseStream::new(futures::stream::iter(pieces), has_tools);
+        futures::executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|c| c.unwrap().delta)
+            .collect()
+    }
+
+    fn chunk(parts: serde_json::Value, finish: Option<&str>) -> serde_json::Value {
+        let mut candidate = json!({"content": {"role": "model", "parts": parts}});
+        if let Some(f) = finish {
+            candidate["finishReason"] = json!(f);
+        }
+        json!({"candidates": [candidate]})
+    }
+
+    #[test]
+    fn stream_with_tools_drops_a_text_preamble_before_the_function_call() {
+        let events = [
+            chunk(json!([{"text": "Let me call "}]), None),
+            chunk(json!([{"text": "the function."}]), None),
+            chunk(
+                json!([{"functionCall": {"name": "answer", "args": {"a": 1}}}]),
+                Some("STOP"),
+            ),
+        ];
+        assert_eq!(collect_stream(&events, true), "{\"a\":1}");
+    }
+
+    #[test]
+    fn stream_with_tools_and_text_only_yields_the_text_at_the_end() {
+        let events = [
+            chunk(json!([{"text": "{\"a\":"}]), None),
+            chunk(json!([{"text": "1}"}]), Some("STOP")),
+        ];
+        assert_eq!(collect_stream(&events, true), "{\"a\":1}");
+    }
+
+    #[test]
+    fn stream_without_tools_streams_text_as_it_arrives() {
+        use futures::StreamExt;
+        let body: String = [
+            chunk(json!([{"text": "Hel"}]), None),
+            chunk(json!([{"text": "lo"}]), Some("STOP")),
+        ]
+        .iter()
+        .map(|e| format!("data: {e}\n\n"))
+        .collect();
+        let stream = GeminiSseStream::new(
+            futures::stream::iter(vec![Ok::<_, reqwest::Error>(Bytes::from(body))]),
+            false,
+        );
+        let deltas: Vec<String> = futures::executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|c| c.unwrap().delta)
+            .collect();
+        assert_eq!(deltas, ["Hel", "lo"]);
     }
 }

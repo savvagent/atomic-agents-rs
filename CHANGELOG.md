@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `atomic-agents` features `native` and `guest`. `native` (on by default through `openai`, and implied by `openai`, `anthropic`, `google` and `mcp`) carries `tokio`, `reqwest`, `tiktoken-rs`, `bytes`, `eventsource-stream` and `tokio-stream`. `guest` provides pure-Rust host traits and adapters (`atomic_agents::guest`; `HostLlmClient` rejects extra parameters named in `guest::TOOL_FORCING_KEYS`, such as `tool_choice` or `response_format`, because the host owns tool choice and output format) and builds with `cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2`.
+- `atomic-agent-runner` 0.1.0, a pipeline interpreter released as a WebAssembly component (`publish = false`; not on crates.io; versioned on its own, with release tags `atomic-agent-runner-v<version>`). WIT package `atomic-agents:runner@0.1.0`, world `runner`: imports `llm`, `mcp` (`call`, `list-tools`), `state`, `log` and `clock`; exports `run(spec, event)`. Steps: `agent`, `tool`, `act`, `foreach`. Containment: output schemas are compiled with a retriever that refuses every external `$ref` (http or file); agent `params` may set only `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and `effort`, and a rendered agent `input` is at most 1 MiB; an agent `system_prompt` is a literal and the rendered `input` reaches the model XML-escaped inside `<untrusted-input>`, with tool output (cut to 64 KiB) inside `<untrusted-tool-output>`; an agent step may not name a tool an act step uses, and such a tool is never offered even when the host lists it; every model tool call counts toward the 500-call limit; spec and event are each at most 1 MiB. Conditions compare numbers by value (`1 == 1.0`), as act constraints do. Step ids and `foreach` `as` names start with a letter or `_`, and `set_state` keys are 1-128 of `[A-Za-z0-9_-]`. The WIT documents what hosts must provide: read tools only from `list-tools`, `state` scoped per pipeline and tenant, memory and fuel/epoch limits, and no honouring of tool-forcing `params`. `atomic-agent-runner/host-tests` runs the component under wasmtime and checks that it imports no `wasi:filesystem`, `wasi:sockets` or `wasi:http`. The host tests are left out of the workspace's `default-members`, so a plain `cargo build` / `cargo test` behaves as before and needs no wasm target; `cargo test --workspace` (with `rustup target add wasm32-wasip2`) runs them.
+
+### Breaking
+
+- `ClientError::Http` exists only with the `native` feature.
+- With `--no-default-features` and no provider feature, `AtomicAgent::run` uses `futures::executor::block_on`.
+
+### Changed
+
+- The Anthropic client no longer forces `tool_choice`. It sends `tool_choice: {"type":"auto"}` with a system instruction naming the extraction tool, because current Claude models reject a forced `tool_choice` with a 400. A model may now reply in text; the reply is parsed and retried if invalid. When a response has both, a `tool_use` block's input wins over text.
+- The Anthropic client's stream no longer mixes text with tool input. With tools offered, the model may write a text preamble before its `tool_use` block; that text used to be concatenated with the `input_json_delta` fragments into invalid JSON. Text is now held back, dropped when a `tool_use` block starts, and yielded once at the end if no tool call came. Without tools, text still streams as it arrives.
+- The OpenAI, Anthropic and Google clients no longer let `ChatRequest::extra` override the tools or the tool choice they set: `tool_choice`, `toolConfig`, `tool_config` and `tools` in `extra` are skipped with a `tracing` warning. Before, an `extra` key could overwrite `tool_choice` after the client had set it to `auto`.
+- The Anthropic and Google streams are fused: once the response body ends they return `None` on every later poll and never poll the body again.
+- The Google (Gemini) client no longer forces a function call. It sends `functionCallingConfig.mode: "AUTO"` (was `"ANY"`) with a system instruction naming the function. A text reply without a `functionCall` is returned as content, a `functionCall`'s arguments win over text, and the stream holds text back the same way as the Anthropic client's.
+
 ## 0.2.1 — 2026-11-19
 
 ### Documentation

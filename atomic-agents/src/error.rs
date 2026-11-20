@@ -31,6 +31,7 @@ pub enum Error {
 /// Error type for LLM client operations.
 #[derive(Error, Debug)]
 pub enum ClientError {
+    #[cfg(feature = "native")]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

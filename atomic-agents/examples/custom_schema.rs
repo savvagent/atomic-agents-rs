@@ -26,14 +26,12 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
 
     let client = OpenAiClient::new(api_key);
-    let system_prompt = SystemPromptGenerator::new()
-        .with_background(vec![
-            "You are a knowledgeable travel guide.".to_string(),
-            "You provide accurate, structured information about cities.".to_string(),
-        ]);
+    let system_prompt = SystemPromptGenerator::new().with_background(vec![
+        "You are a knowledgeable travel guide.".to_string(),
+        "You provide accurate, structured information about cities.".to_string(),
+    ]);
 
-    let config = AgentConfig::new(client, "gpt-4o-mini")
-        .with_system_prompt(system_prompt);
+    let config = AgentConfig::new(client, "gpt-4o-mini").with_system_prompt(system_prompt);
 
     let agent = AtomicAgent::<BasicChatInputSchema, CityAnalysisOutput, _>::new(config);
 

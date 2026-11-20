@@ -95,7 +95,11 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
 ///
 /// Proxies are disabled (`no_proxy`): a proxy picked up from `HTTP(S)_PROXY` /
 /// `ALL_PROXY` would re-resolve the hostname itself and defeat the IP pinning.
-fn configure_client(builder: reqwest::ClientBuilder, user_agent: &str, timeout: Duration) -> reqwest::ClientBuilder {
+fn configure_client(
+    builder: reqwest::ClientBuilder,
+    user_agent: &str,
+    timeout: Duration,
+) -> reqwest::ClientBuilder {
     builder
         .no_proxy()
         .user_agent(user_agent)
@@ -178,7 +182,9 @@ impl NetGuard {
             {
                 builder = builder.resolve_to_addrs(host, &addrs);
             }
-            let client = builder.build().map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+            let client = builder
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
             let response = client
                 .get(current.clone())
                 .header("Accept", accept)
@@ -216,10 +222,26 @@ mod tests {
     #[test]
     fn classifies_forbidden_addresses() {
         for s in [
-            "127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1",
-            "169.254.169.254", "0.0.0.0", "224.0.0.1", "255.255.255.255", "100.64.0.1",
-            "100.127.255.255", "::1", "::", "ff02::1", "fc00::1", "fd12:3456::1", "fe80::1",
-            "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:192.168.0.1",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "100.64.0.1",
+            "100.127.255.255",
+            "::1",
+            "::",
+            "ff02::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:192.168.0.1",
         ] {
             assert!(is_forbidden_ip(ip(s)), "{s} should be forbidden");
         }
@@ -228,8 +250,14 @@ mod tests {
     #[test]
     fn allows_public_addresses() {
         for s in [
-            "8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "100.63.255.255",
-            "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8",
+            "8.8.8.8",
+            "1.1.1.1",
+            "172.15.0.1",
+            "172.32.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "2606:4700:4700::1111",
+            "::ffff:8.8.8.8",
         ] {
             assert!(!is_forbidden_ip(ip(s)), "{s} should be allowed");
         }
@@ -239,16 +267,38 @@ mod tests {
     fn classifies_extended_forbidden_ranges() {
         for s in [
             // NAT64 and local-use NAT64
-            "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::10.0.0.1", "64:ff9b:1::1", "64:ff9b:1:ffff::1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::10.0.0.1",
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff::1",
             // 6to4
-            "2002:7f00:1::1", "2002:a9fe:a9fe::1", "2002:c0a8:101::", "2002:0a00:0001::5",
+            "2002:7f00:1::1",
+            "2002:a9fe:a9fe::1",
+            "2002:c0a8:101::",
+            "2002:0a00:0001::5",
             // IPv4-compatible
-            "::127.0.0.1", "::10.0.0.1", "::169.254.169.254", "::0.0.0.5",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "::169.254.169.254",
+            "::0.0.0.5",
             // site-local, Teredo, documentation
-            "fec0::1", "feff::1", "2001::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:db8::1",
+            "fec0::1",
+            "feff::1",
+            "2001::1",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:db8::1",
             // IPv4 ranges
-            "0.1.2.3", "0.255.255.255", "198.18.0.1", "198.19.255.255", "240.0.0.1", "250.1.1.1",
-            "192.0.0.1", "192.0.2.5", "198.51.100.7", "203.0.113.9",
+            "0.1.2.3",
+            "0.255.255.255",
+            "198.18.0.1",
+            "198.19.255.255",
+            "240.0.0.1",
+            "250.1.1.1",
+            "192.0.0.1",
+            "192.0.2.5",
+            "198.51.100.7",
+            "203.0.113.9",
         ] {
             assert!(is_forbidden_ip(ip(s)), "{s} should be forbidden");
         }
@@ -257,9 +307,21 @@ mod tests {
     #[test]
     fn extended_ranges_do_not_over_block() {
         for s in [
-            "8.8.8.8", "2606:4700::1111", "64:ff9b::808:808", "2002:808:808::1", "::8.8.8.8",
-            "198.17.255.255", "198.20.0.1", "192.0.1.1", "192.0.3.1", "198.51.101.1", "203.0.112.1",
-            "223.255.255.255", "2001:4860:4860::8888", "2001:1::1", "fe00::1",
+            "8.8.8.8",
+            "2606:4700::1111",
+            "64:ff9b::808:808",
+            "2002:808:808::1",
+            "::8.8.8.8",
+            "198.17.255.255",
+            "198.20.0.1",
+            "192.0.1.1",
+            "192.0.3.1",
+            "198.51.101.1",
+            "203.0.112.1",
+            "223.255.255.255",
+            "2001:4860:4860::8888",
+            "2001:1::1",
+            "fe00::1",
         ] {
             assert!(!is_forbidden_ip(ip(s)), "{s} should be allowed");
         }
@@ -268,12 +330,27 @@ mod tests {
     #[tokio::test]
     async fn configured_client_ignores_proxies() {
         let proxy = MockServer::start().await;
-        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_string("proxy")).mount(&proxy).await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("proxy"))
+            .mount(&proxy)
+            .await;
         let target = MockServer::start().await;
-        Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_string("direct")).mount(&target).await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("direct"))
+            .mount(&target)
+            .await;
         let base = reqwest::Client::builder().proxy(reqwest::Proxy::all(proxy.uri()).unwrap());
-        let client = configure_client(base, "t", Duration::from_secs(5)).build().unwrap();
-        let body = client.get(target.uri()).send().await.unwrap().text().await.unwrap();
+        let client = configure_client(base, "t", Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let body = client
+            .get(target.uri())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
         assert_eq!(body, "direct");
         assert!(proxy.received_requests().await.unwrap().is_empty());
     }
@@ -281,35 +358,66 @@ mod tests {
     #[tokio::test]
     async fn non_redirect_3xx_is_returned_to_caller() {
         let server = MockServer::start().await;
-        Mock::given(method("GET")).respond_with(ResponseTemplate::new(300)).mount(&server).await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(300))
+            .mount(&server)
+            .await;
         let guard = NetGuard::new(true);
-        let resp = guard.get(&server.uri(), "t", "*/*", Duration::from_secs(5)).await.unwrap();
+        let resp = guard
+            .get(&server.uri(), "t", "*/*", Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(resp.status().as_u16(), 300);
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(304).insert_header("Location", "http://169.254.169.254/"))
+            .respond_with(
+                ResponseTemplate::new(304).insert_header("Location", "http://169.254.169.254/"),
+            )
             .mount(&server)
             .await;
-        let resp = guard.get(&server.uri(), "t", "*/*", Duration::from_secs(5)).await.unwrap();
+        let resp = guard
+            .get(&server.uri(), "t", "*/*", Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(resp.status().as_u16(), 304);
     }
 
     #[tokio::test]
     async fn validate_rejects_loopback_and_bad_schemes() {
         let guard = NetGuard::new(false);
-        let err = guard.validate(&"http://127.0.0.1:80/".parse().unwrap()).await.unwrap_err();
+        let err = guard
+            .validate(&"http://127.0.0.1:80/".parse().unwrap())
+            .await
+            .unwrap_err();
         assert!(err.contains("non-public"));
-        assert!(guard.validate(&"http://[::1]/".parse().unwrap()).await.is_err());
-        assert!(guard.validate(&"ftp://example.com/".parse().unwrap()).await.is_err());
-        assert!(NetGuard::new(true).validate(&"http://127.0.0.1:80/".parse().unwrap()).await.is_ok());
+        assert!(
+            guard
+                .validate(&"http://[::1]/".parse().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            guard
+                .validate(&"ftp://example.com/".parse().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            NetGuard::new(true)
+                .validate(&"http://127.0.0.1:80/".parse().unwrap())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn redirect_to_private_host_is_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(302).insert_header("Location", "http://127.0.0.2:9/x"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("Location", "http://127.0.0.2:9/x"),
+            )
             .mount(&server)
             .await;
         // The first hop (127.0.0.1) is exempt; the redirect target must be re-validated.
@@ -321,7 +429,10 @@ mod tests {
             .get(&server.uri(), "t", "*/*", Duration::from_secs(5))
             .await
             .unwrap_err();
-        assert!(err.contains("127.0.0.2") && err.contains("non-public"), "{err}");
+        assert!(
+            err.contains("127.0.0.2") && err.contains("non-public"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -332,7 +443,10 @@ mod tests {
             .mount(&server)
             .await;
         let guard = NetGuard::new(true);
-        let err = guard.get(&server.uri(), "t", "*/*", Duration::from_secs(5)).await.unwrap_err();
+        let err = guard
+            .get(&server.uri(), "t", "*/*", Duration::from_secs(5))
+            .await
+            .unwrap_err();
         assert!(err.contains("Too many redirects"));
     }
 }

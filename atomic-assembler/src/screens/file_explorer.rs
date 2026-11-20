@@ -51,9 +51,7 @@ impl FileExplorerScreen {
                 })
                 .filter(|e| {
                     // Hide hidden files
-                    !e.file_name()
-                        .to_string_lossy()
-                        .starts_with('.')
+                    !e.file_name().to_string_lossy().starts_with('.')
                 })
                 .map(|e| e.path())
                 .collect();

@@ -23,15 +23,14 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
 
     let client = OpenAiClient::new(api_key);
-    let system_prompt = SystemPromptGenerator::new()
-        .with_background(vec![
-            "You are an assistant that can perform calculations.".to_string(),
-            "If the user asks a math question, set tool to 'calculator' and provide the expression.".to_string(),
-            "Otherwise, respond directly with direct_response.".to_string(),
-        ]);
+    let system_prompt = SystemPromptGenerator::new().with_background(vec![
+        "You are an assistant that can perform calculations.".to_string(),
+        "If the user asks a math question, set tool to 'calculator' and provide the expression."
+            .to_string(),
+        "Otherwise, respond directly with direct_response.".to_string(),
+    ]);
 
-    let config = AgentConfig::new(client, "gpt-4o-mini")
-        .with_system_prompt(system_prompt);
+    let config = AgentConfig::new(client, "gpt-4o-mini").with_system_prompt(system_prompt);
     let agent = AtomicAgent::<BasicChatInputSchema, OrchestratorOutput, _>::new(config);
 
     let calc = CalculatorTool::default();

@@ -89,7 +89,10 @@ impl TavilySearchTool {
         }
     }
 
-    async fn search_query(&self, query: &str) -> std::result::Result<Vec<TavilySearchResultItem>, Error> {
+    async fn search_query(
+        &self,
+        query: &str,
+    ) -> std::result::Result<Vec<TavilySearchResultItem>, Error> {
         let mut body = serde_json::json!({
             "api_key": self.api_key,
             "query": query,
@@ -117,7 +120,10 @@ impl TavilySearchTool {
             .await
             .map_err(|e| Error::Validation(format!("Failed to parse Tavily response: {e}")))?;
 
-        let answer = result.get("answer").and_then(|a| a.as_str()).map(String::from);
+        let answer = result
+            .get("answer")
+            .and_then(|a| a.as_str())
+            .map(String::from);
 
         let items = result
             .get("results")
@@ -125,9 +131,20 @@ impl TavilySearchTool {
             .map(|arr| {
                 arr.iter()
                     .map(|item| TavilySearchResultItem {
-                        title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                        url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                        content: item.get("content").and_then(|c| c.as_str()).map(String::from),
+                        title: item
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        url: item
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        content: item
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(String::from),
                         score: item.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0),
                         query: Some(query.to_string()),
                         answer: answer.clone(),

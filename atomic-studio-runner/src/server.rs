@@ -11,17 +11,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -29,7 +29,7 @@ use tower_http::trace::TraceLayer;
 use crate::client_factory::EnvClientFactory;
 use crate::interpreter::{ExecutionEvent, PipelineInterpreter};
 use crate::pipeline::PipelineDefinition;
-use crate::validate::{validate_pipeline, ValidationError, ValidationWarning};
+use crate::validate::{ValidationError, ValidationWarning, validate_pipeline};
 
 #[derive(Clone, Default)]
 struct AppState;

@@ -142,7 +142,10 @@ pub struct RouteCondition {
 #[serde(rename_all = "snake_case")]
 pub enum ConditionExpr {
     /// Field value equals a string.
-    Equals { field: String, value: serde_json::Value },
+    Equals {
+        field: String,
+        value: serde_json::Value,
+    },
     /// Field value contains a substring.
     Contains { field: String, value: String },
     /// Field value is greater than a number.
@@ -264,14 +267,16 @@ impl PipelineDefinition {
 
     /// Loads a pipeline definition from a file.
     pub fn from_file(path: &std::path::Path) -> Result<Self, crate::error::Error> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::error::Error::Io(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| crate::error::Error::Io(e.to_string()))?;
         Self::from_json(&content).map_err(|e| crate::error::Error::Pipeline(e.to_string()))
     }
 
     /// Saves the pipeline definition to a file.
     pub fn to_file(&self, path: &std::path::Path) -> Result<(), crate::error::Error> {
-        let json = self.to_json().map_err(|e| crate::error::Error::Pipeline(e.to_string()))?;
+        let json = self
+            .to_json()
+            .map_err(|e| crate::error::Error::Pipeline(e.to_string()))?;
         std::fs::write(path, json).map_err(|e| crate::error::Error::Io(e.to_string()))
     }
 }

@@ -55,17 +55,31 @@ fn parse_iso_date(s: &str) -> Option<(u32, u32, u32)> {
     }
     let digits = |r: std::ops::Range<usize>| -> Option<u32> {
         let part = &s[r];
-        if part.bytes().all(|c| c.is_ascii_digit()) { part.parse().ok() } else { None }
+        if part.bytes().all(|c| c.is_ascii_digit()) {
+            part.parse().ok()
+        } else {
+            None
+        }
     };
     let (y, m, d) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
     let max_day = match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if leap { 29 } else { 28 },
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
         _ => return None,
     };
-    if y == 0 || d == 0 || d > max_day { None } else { Some((y, m, d)) }
+    if y == 0 || d == 0 || d > max_day {
+        None
+    } else {
+        Some((y, m, d))
+    }
 }
 
 /// Validates a BoCha `freshness` value: a preset, a real `YYYY-MM-DD` date, or
@@ -101,7 +115,10 @@ pub fn validate_freshness(value: &str) -> std::result::Result<(), Error> {
 
 impl BochaSearchConfig {
     /// Sets the freshness filter, validating it first.
-    pub fn with_freshness(mut self, freshness: impl Into<String>) -> std::result::Result<Self, Error> {
+    pub fn with_freshness(
+        mut self,
+        freshness: impl Into<String>,
+    ) -> std::result::Result<Self, Error> {
         let freshness = freshness.into();
         validate_freshness(&freshness)?;
         self.freshness = freshness;
@@ -150,7 +167,10 @@ impl BochaSearchTool {
             count: search_config.count,
             include: search_config.include,
             exclude: search_config.exclude,
-            endpoint: format!("{}/v1/web-search", search_config.base_url.trim_end_matches('/')),
+            endpoint: format!(
+                "{}/v1/web-search",
+                search_config.base_url.trim_end_matches('/')
+            ),
             client: reqwest::Client::new(),
         }
     }
@@ -165,7 +185,11 @@ impl BochaSearchTool {
 
     /// Runs the tool, overriding the configured result count for this call.
     /// `None` or `Some(0)` falls back to the configured count.
-    pub fn run_with_count(&self, input: BochaSearchInput, count: Option<usize>) -> Result<BochaSearchOutput> {
+    pub fn run_with_count(
+        &self,
+        input: BochaSearchInput,
+        count: Option<usize>,
+    ) -> Result<BochaSearchOutput> {
         validate_freshness(&self.freshness)?;
         let count = count.filter(|c| *c > 0).unwrap_or(self.count);
         let results = tokio::task::block_in_place(|| {
@@ -225,7 +249,11 @@ impl BochaSearchTool {
 
     /// Extracts results from a BoCha response (`data.webPages.value`), skipping
     /// entries without a name or URL and keeping at most `count`.
-    fn parse_results(result: &serde_json::Value, query: &str, count: usize) -> Vec<BochaSearchResultItem> {
+    fn parse_results(
+        result: &serde_json::Value,
+        query: &str,
+        count: usize,
+    ) -> Vec<BochaSearchResultItem> {
         result
             .pointer("/data/webPages/value")
             .and_then(|r| r.as_array())
@@ -235,7 +263,10 @@ impl BochaSearchTool {
                         Some(BochaSearchResultItem {
                             name: item.get("name")?.as_str()?.to_string(),
                             url: item.get("url")?.as_str()?.to_string(),
-                            snippet: item.get("snippet").and_then(|s| s.as_str()).map(String::from),
+                            snippet: item
+                                .get("snippet")
+                                .and_then(|s| s.as_str())
+                                .map(String::from),
                             query: Some(query.to_string()),
                         })
                     })
@@ -265,21 +296,46 @@ mod tests {
 
     #[test]
     fn freshness_accepts_presets_dates_and_ranges() {
-        for v in ["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear", "2024-02-29", "2024-01-01..2024-01-01", "2023-01-01..2024-12-31"] {
+        for v in [
+            "noLimit",
+            "oneDay",
+            "oneWeek",
+            "oneMonth",
+            "oneYear",
+            "2024-02-29",
+            "2024-01-01..2024-01-01",
+            "2023-01-01..2024-12-31",
+        ] {
             assert!(validate_freshness(v).is_ok(), "{v}");
         }
     }
 
     #[test]
     fn freshness_rejects_invalid_values() {
-        for v in ["", "yesterday", "2023-02-29", "2024-13-01", "2024-00-10", "2024-1-01", "2024-01-02..2024-01-01", "2024-01-01..", "2024-01-01..2024-01-02..2024-01-03", "+024-01-01", "oneweek"] {
+        for v in [
+            "",
+            "yesterday",
+            "2023-02-29",
+            "2024-13-01",
+            "2024-00-10",
+            "2024-1-01",
+            "2024-01-02..2024-01-01",
+            "2024-01-01..",
+            "2024-01-01..2024-01-02..2024-01-03",
+            "+024-01-01",
+            "oneweek",
+        ] {
             assert!(validate_freshness(v).is_err(), "{v}");
         }
     }
 
     #[test]
     fn with_freshness_validates() {
-        assert!(BochaSearchConfig::new("k").with_freshness("2024-01-01..2024-02-01").is_ok());
+        assert!(
+            BochaSearchConfig::new("k")
+                .with_freshness("2024-01-01..2024-02-01")
+                .is_ok()
+        );
         assert!(BochaSearchConfig::new("k").with_freshness("bad").is_err());
     }
 
@@ -288,7 +344,9 @@ mod tests {
         let mut cfg = BochaSearchConfig::new("k");
         cfg.freshness = "bad".into();
         let tool = BochaSearchTool::new(cfg);
-        let out = tool.run(BochaSearchInput { queries: vec!["q".into()] });
+        let out = tool.run(BochaSearchInput {
+            queries: vec!["q".into()],
+        });
         assert!(out.is_err());
     }
 
@@ -323,7 +381,10 @@ mod tests {
         assert_eq!(items[0].snippet.as_deref(), Some("sa"));
         assert_eq!(items[1].snippet, None);
         assert!(items.iter().all(|i| i.query.as_deref() == Some("rust")));
-        assert!(BochaSearchTool::parse_results(&serde_json::json!({"web": {"results": []}}), "q", 5).is_empty());
+        assert!(
+            BochaSearchTool::parse_results(&serde_json::json!({"web": {"results": []}}), "q", 5)
+                .is_empty()
+        );
     }
 }
 
@@ -345,7 +406,9 @@ mod network_tests {
         Mock::given(method("POST"))
             .and(path("/v1/web-search"))
             .and(header("authorization", "Bearer test-key"))
-            .and(body_partial_json(serde_json::json!({ "query": "rust", "count": 10, "freshness": "noLimit" })))
+            .and(body_partial_json(
+                serde_json::json!({ "query": "rust", "count": 10, "freshness": "noLimit" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 200,
                 "data": { "webPages": { "value": [
@@ -356,7 +419,11 @@ mod network_tests {
             .mount(&server)
             .await;
 
-        let out = tool_for(&server).run(BochaSearchInput { queries: vec!["rust".into()] }).unwrap();
+        let out = tool_for(&server)
+            .run(BochaSearchInput {
+                queries: vec!["rust".into()],
+            })
+            .unwrap();
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].url, "https://rust-lang.org");
     }

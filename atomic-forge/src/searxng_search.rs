@@ -73,7 +73,11 @@ impl SearxngSearchTool {
 
     /// Maps tool-level category names to SearXNG category names.
     fn searxng_category(category: &str) -> &str {
-        if category == "social_media" { "social media" } else { category }
+        if category == "social_media" {
+            "social media"
+        } else {
+            category
+        }
     }
 
     async fn search_query(
@@ -81,10 +85,7 @@ impl SearxngSearchTool {
         query: &str,
         category: Option<&str>,
     ) -> std::result::Result<Vec<SearxngSearchResultItem>, Error> {
-        let mut params = vec![
-            ("q", query.to_string()),
-            ("format", "json".to_string()),
-        ];
+        let mut params = vec![("q", query.to_string()), ("format", "json".to_string())];
 
         if let Some(cat) = category {
             params.push(("categories", Self::searxng_category(cat).to_string()));
@@ -111,9 +112,20 @@ impl SearxngSearchTool {
                 arr.iter()
                     .take(self.max_results)
                     .map(|item| SearxngSearchResultItem {
-                        url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                        title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                        content: item.get("content").and_then(|c| c.as_str()).map(String::from),
+                        url: item
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        title: item
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        content: item
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(String::from),
                         query: query.to_string(),
                     })
                     .collect()
@@ -160,7 +172,10 @@ mod tests {
 
     #[test]
     fn social_media_maps_to_searxng_category() {
-        assert_eq!(SearxngSearchTool::searxng_category("social_media"), "social media");
+        assert_eq!(
+            SearxngSearchTool::searxng_category("social_media"),
+            "social media"
+        );
         assert_eq!(SearxngSearchTool::searxng_category("news"), "news");
         assert_eq!(SearxngSearchTool::searxng_category("general"), "general");
     }

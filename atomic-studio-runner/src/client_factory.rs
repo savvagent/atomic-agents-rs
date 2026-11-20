@@ -20,13 +20,17 @@ impl ClientFactory for EnvClientFactory {
                 let key = std::env::var("OPENAI_API_KEY").map_err(|_| {
                     Error::Pipeline("OPENAI_API_KEY environment variable is not set".into())
                 })?;
-                Ok(Box::new(atomic_agents::client::openai::OpenAiClient::new(key)))
+                Ok(Box::new(atomic_agents::client::openai::OpenAiClient::new(
+                    key,
+                )))
             }
             "anthropic" => {
                 let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
                     Error::Pipeline("ANTHROPIC_API_KEY environment variable is not set".into())
                 })?;
-                Ok(Box::new(atomic_agents::client::anthropic::AnthropicClient::new(key)))
+                Ok(Box::new(
+                    atomic_agents::client::anthropic::AnthropicClient::new(key),
+                ))
             }
             "google" => {
                 let key = std::env::var("GOOGLE_API_KEY")
@@ -37,7 +41,9 @@ impl ClientFactory for EnvClientFactory {
                                 .into(),
                         )
                     })?;
-                Ok(Box::new(atomic_agents::client::google::GoogleClient::new(key)))
+                Ok(Box::new(atomic_agents::client::google::GoogleClient::new(
+                    key,
+                )))
             }
             other => Err(Error::Pipeline(format!(
                 "Unknown or unsupported provider '{other}'"

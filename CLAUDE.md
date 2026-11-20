@@ -9,20 +9,30 @@ Rust port of the [atomic-agents](https://github.com/Eigenwise/atomic-agents) Pyt
 ## Build & Test Commands
 
 ```bash
-cargo build                              # Build all workspace crates
-cargo test                               # Run all tests
+cargo build                              # Build the default members (all but the host tests)
+cargo test                               # Test the default members; needs no wasm target
+cargo test --workspace                   # Also runs the host tests (needs `rustup target add wasm32-wasip2`)
 cargo test -p atomic-agents              # Test core crate only
 cargo test -p atomic-forge               # Test tools crate only
 cargo test test_agent_run_async          # Run a single test by name
 cargo test -p atomic-agents --features mcp --test mcp_integration  # MCP integration scenarios (harness=false)
 cargo build -p atomic-agents --features "openai,anthropic,google,mcp"  # All features
+cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2  # Guest build (needs `rustup target add wasm32-wasip2`)
+cargo build -p atomic-agent-runner --release --target wasm32-wasip2  # Runner component: target/wasm32-wasip2/release/atomic_agent_runner.wasm
+cargo test -p atomic-agent-runner        # Runner interpreter (native)
+cargo test -p atomic-agent-runner-host-tests  # Host tests: build the component and the env-probe fixture, run them under wasmtime (needs `rustup target add wasm32-wasip2`)
+```
+
+`ATOMIC_AGENT_RUNNER_WASM=<file>` makes the host tests use a given runner component instead of building one. It skips the runner build only: the sandbox test still builds the `env-probe` fixture, so the `wasm32-wasip2` target is still required.
+
+```bash
 cargo run -p atomic-assembler            # Run the TUI tool browser
 cargo run --example basic_chatbot -p atomic-agents --features openai   # Run an example
 cargo run -p atomic-studio-runner -- serve --addr 127.0.0.1:8787 \
   --static-dir atomic-studio/build       # Serve the studio PWA + JSON API
 ```
 
-Feature flags on `atomic-agents`: `openai` (default), `anthropic`, `google`, `mcp`.
+Feature flags on `atomic-agents`: `openai` (default), `anthropic`, `google`, `mcp`, plus `native` (tokio/reqwest/tiktoken stack, implied by the provider features and `mcp`) and `guest` (pure-Rust host traits for wasm32-wasip2).
 
 ### atomic-studio (PWA)
 
@@ -50,13 +60,15 @@ API keys for agent execution come from environment variables: `OPENAI_API_KEY`,
 
 ## Workspace Structure
 
-Five crates in a Cargo workspace:
+Seven members in a Cargo workspace (`atomic-agent-runner/host-tests/env-probe` is an excluded fixture). `default-members` lists all but `atomic-agent-runner/host-tests`, so plain `cargo build` / `cargo test` need no wasm target; `--workspace` includes the host tests. `atomic-agent-runner` is versioned on its own (`0.1.0`, matching its WIT package and `atomic-agent-runner-v<version>` tags); the other crates share the workspace version.
 
 - **`atomic-agents`** — Core framework: agent, LLM clients, schemas, chat history, streaming, hooks, MCP integration
 - **`atomic-agents-macros`** — Proc macro crate providing `#[derive(IOSchema)]`
 - **`atomic-forge`** — Collection of reusable tools (calculator, web search, scraper, YouTube transcripts)
 - **`atomic-assembler`** — TUI application (ratatui) for browsing and downloading atomic-forge tools
 - **`atomic-studio-runner`** — Pipeline interpreter + HTTP server backing the atomic-studio PWA
+- **`atomic-agent-runner`** — The pipeline interpreter as a wasm32-wasip2 component (WIT in `wit/world.wit`; `publish = false`)
+- **`atomic-agent-runner/host-tests`** — Runs the component under wasmtime and checks its sandbox
 
 ## Architecture
 
