@@ -227,10 +227,10 @@ Steps are `agent`, `tool`, `act` and `foreach` (at most 100 items, no nesting). 
 cargo build -p atomic-agent-runner --release --target wasm32-wasip2
 # component: target/wasm32-wasip2/release/atomic_agent_runner.wasm
 cargo test -p atomic-agent-runner                # interpreter, native
-cargo test -p atomic-agent-runner-host-tests     # builds the component and runs it under wasmtime
+cargo test -p atomic-agent-runner-host-tests     # builds the component and the env-probe fixture, runs them under wasmtime
 ```
 
-`ATOMIC_AGENT_RUNNER_WASM=<file>` makes the host tests run a given component instead of building one.
+The host tests need the `wasm32-wasip2` target. `ATOMIC_AGENT_RUNNER_WASM=<file>` makes them use a given runner component instead of building one; it skips the runner build only, since the sandbox test still builds its `env-probe` fixture, so the target is still required.
 
 ### What the host provides
 
@@ -316,6 +316,13 @@ git clone https://github.com/savvagent/atomic-agents-rs.git
 cd atomic-agents-rs
 cargo build
 cargo test
+```
+
+`cargo build` and `cargo test` cover every crate except `atomic-agent-runner/host-tests`, which is left out of the workspace's `default-members` because it builds WebAssembly components. To run it too:
+
+```bash
+rustup target add wasm32-wasip2
+cargo test --workspace                          # or: cargo test -p atomic-agent-runner-host-tests
 ```
 
 ## Provider & Model Compatibility

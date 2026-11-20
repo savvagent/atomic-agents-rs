@@ -7,7 +7,7 @@
 
 use atomic_agent_runner_host_tests::{probe_sandbox, probe_with};
 use serde_json::json;
-use wasmtime_wasi::WasiCtx;
+use wasmtime_wasi::{FsPerms, WasiCtx};
 
 #[test]
 fn sandbox_gives_no_env_args_or_filesystem() {
@@ -40,18 +40,27 @@ fn sandbox_gives_no_env_args_or_filesystem() {
         "guest could read its cwd"
     );
 
-    // Positive control: a context that grants one variable and one argument
-    // (never the real environment) is reported by the probe, so the empty
-    // report above is the sandbox at work, not a probe that sees nothing.
-    let control = probe_with(
-        WasiCtx::builder()
-            .env("ATOMIC_AGENT_RUNNER_PROBE", "control")
-            .arg("probe")
-            .build(),
-    );
+    // Positive control: a context that grants one variable, one argument
+    // and a read-only preopened "." (never the real environment) is reported
+    // by the probe, so the empty report above is the sandbox at work, not a
+    // probe that sees nothing.
+    let cwd = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sandbox-control-cwd");
+    std::fs::create_dir_all(&cwd).expect("control cwd is created");
+    let mut control = WasiCtx::builder();
+    control
+        .env("ATOMIC_AGENT_RUNNER_PROBE", "control")
+        .arg("probe")
+        .preopened_dir(&cwd, ".", FsPerms::ReadOnly)
+        .expect("control cwd is preopened");
+    let control = probe_with(control.build());
     assert_eq!(
         control["vars"],
         json!([["ATOMIC_AGENT_RUNNER_PROBE", "control"]])
     );
     assert_eq!(control["args"], json!(["probe"]));
+    assert_eq!(
+        control["cwd_readable"],
+        json!(true),
+        "guest could not read a preopened cwd"
+    );
 }
