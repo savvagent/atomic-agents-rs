@@ -1,12 +1,13 @@
 //! Component glue: the [`Host`] over the world's imports, and the `run`
 //! export over [`interpreter::run`].
 //!
-//! The WIT types mirror `atomic_agents::guest` one to one, so everything here
+//! The WIT types mirror `atomic_agents::guest` (and the runner's own
+//! [`Level`], [`CallOrigin`] and [`RunError`]) one to one, so everything here
 //! is field-by-field conversion.
 
 use ::atomic_agents::guest as g;
 
-use crate::host::{Host, Level};
+use crate::host::{CallOrigin, Host, Level};
 use crate::interpreter::{self, RunError};
 
 mod bindings {
@@ -28,19 +29,17 @@ impl g::LlmHost for WitHost {
     }
 }
 
-impl g::McpHost for WitHost {
-    fn call(&self, tool: &str, args: &str) -> Result<String, g::ToolError> {
-        mcp::call(tool, args).map_err(Into::into)
-    }
-
+impl Host for WitHost {
     fn list_tools(&self) -> Result<Vec<g::ToolInfo>, g::ToolError> {
         mcp::list_tools()
             .map(|tools| tools.into_iter().map(Into::into).collect())
             .map_err(Into::into)
     }
-}
 
-impl Host for WitHost {
+    fn call(&self, tool: &str, args: &str, origin: CallOrigin) -> Result<String, g::ToolError> {
+        mcp::call(tool, args, origin.into()).map_err(Into::into)
+    }
+
     fn state_get(&self, key: &str) -> Option<String> {
         state::get(key)
     }
@@ -235,6 +234,16 @@ impl From<Level> for w::Level {
             Level::Info => Self::Info,
             Level::Warn => Self::Warn,
             Level::Error => Self::Error,
+        }
+    }
+}
+
+impl From<CallOrigin> for w::CallOrigin {
+    fn from(o: CallOrigin) -> Self {
+        match o {
+            CallOrigin::Model => Self::Model,
+            CallOrigin::ToolStep => Self::ToolStep,
+            CallOrigin::ActStep => Self::ActStep,
         }
     }
 }

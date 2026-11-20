@@ -2,8 +2,8 @@
 //! foreach limit, and the import allowlist.
 
 use atomic_agent_runner_host_tests::{
-    Completion, ContentBlock, FIXED_NOW_MS, Level, LlmError, Role, RunError, Script, ToolCall,
-    Usage, run, runner_imports,
+    CallOrigin, Completion, ContentBlock, FIXED_NOW_MS, Level, LlmError, Role, RunError, Script,
+    ToolCall, Usage, run, runner_imports,
 };
 use serde_json::{Value, json};
 
@@ -100,15 +100,33 @@ fn sample_pipeline_runs_every_kind_through_the_component() {
         ])
     );
 
+    // Every call crossed the boundary with the origin of the step kind
+    // that made it: the model's own call is `model`, whatever it names.
     assert_eq!(
         host.calls,
         vec![
-            ("search".into(), json!({"q": "crash"})),
-            ("search".into(), json!({"q": "bug"})),
-            ("add_label".into(), json!({"label": "bug"})),
-            ("comment".into(), json!({"id": 1, "text": "s1"})),
-            ("comment".into(), json!({"id": 2, "text": "s2"})),
-            ("comment".into(), json!({"id": 3, "text": "s3"})),
+            ("search".into(), json!({"q": "crash"}), CallOrigin::Model),
+            ("search".into(), json!({"q": "bug"}), CallOrigin::ToolStep),
+            (
+                "add_label".into(),
+                json!({"label": "bug"}),
+                CallOrigin::ActStep
+            ),
+            (
+                "comment".into(),
+                json!({"id": 1, "text": "s1"}),
+                CallOrigin::ActStep
+            ),
+            (
+                "comment".into(),
+                json!({"id": 2, "text": "s2"}),
+                CallOrigin::ActStep
+            ),
+            (
+                "comment".into(),
+                json!({"id": 3, "text": "s3"}),
+                CallOrigin::ActStep
+            ),
         ]
     );
     assert_eq!(out["actions"].as_array().map(Vec::len), Some(4));
@@ -197,12 +215,12 @@ fn foreach_over_max_items_is_a_limit_before_any_act() {
 
 /// The world's own interfaces.
 const WORLD: [&str; 6] = [
-    "atomic-agents:runner/types@0.1.0",
-    "atomic-agents:runner/llm@0.1.0",
-    "atomic-agents:runner/mcp@0.1.0",
-    "atomic-agents:runner/state@0.1.0",
-    "atomic-agents:runner/log@0.1.0",
-    "atomic-agents:runner/clock@0.1.0",
+    "atomic-agents:runner/types@0.2.0",
+    "atomic-agents:runner/llm@0.2.0",
+    "atomic-agents:runner/mcp@0.2.0",
+    "atomic-agents:runner/state@0.2.0",
+    "atomic-agents:runner/log@0.2.0",
+    "atomic-agents:runner/clock@0.2.0",
 ];
 
 /// What the Rust std runtime may import beyond the world: process exit,

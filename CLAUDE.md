@@ -60,7 +60,7 @@ API keys for agent execution come from environment variables: `OPENAI_API_KEY`,
 
 ## Workspace Structure
 
-Seven members in a Cargo workspace (`atomic-agent-runner/host-tests/env-probe` is an excluded fixture). `default-members` lists all but `atomic-agent-runner/host-tests`, so plain `cargo build` / `cargo test` need no wasm target; `--workspace` includes the host tests. `atomic-agent-runner` is versioned on its own (`0.1.0`, matching its WIT package and `atomic-agent-runner-v<version>` tags); the other crates share the workspace version.
+Seven members in a Cargo workspace (`atomic-agent-runner/host-tests/env-probe` is an excluded fixture). `default-members` lists all but `atomic-agent-runner/host-tests`, so plain `cargo build` / `cargo test` need no wasm target; `--workspace` includes the host tests. `atomic-agent-runner` is versioned on its own (`0.2.0`, matching its WIT package and `atomic-agent-runner-v<version>` tags); the other crates share the workspace version.
 
 - **`atomic-agents`** — Core framework: agent, LLM clients, schemas, chat history, streaming, hooks, MCP integration
 - **`atomic-agents-macros`** — Proc macro crate providing `#[derive(IOSchema)]`

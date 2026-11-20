@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Breaking
+
+- `atomic-agent-runner` 0.2.0: WIT package `atomic-agents:runner@0.2.0`. `mcp.call` takes a third parameter, `origin: call-origin` (`model`, `tool-step` or `act-step`), a new enum in `types`. The runner's interpreter sets it from the kind of step making the call, never from model output or from `args`, so a call the model asks for is always `model`, whatever tool it names. Hosts can now refuse a write tool unless the origin is `act-step` and an act step of the deployed spec names it, as one check among several. A 0.1.0 host cannot instantiate a 0.2.0 component; `atomic-agent-runner-v0.1.0` stays as released. In the crate, `host::Host` no longer extends `atomic_agents::guest::McpHost`: it declares `list_tools` and `call(tool, args, origin)` itself, with `host::CallOrigin`. `McpHost` is unchanged.
+
 ### Added
 
 - `atomic-agents` features `native` and `guest`. `native` (on by default through `openai`, and implied by `openai`, `anthropic`, `google` and `mcp`) carries `tokio`, `reqwest`, `tiktoken-rs`, `bytes`, `eventsource-stream` and `tokio-stream`. `guest` provides pure-Rust host traits and adapters (`atomic_agents::guest`; `HostLlmClient` rejects extra parameters named in `guest::TOOL_FORCING_KEYS`, such as `tool_choice` or `response_format`, because the host owns tool choice and output format) and builds with `cargo build -p atomic-agents --no-default-features --features guest --target wasm32-wasip2`.

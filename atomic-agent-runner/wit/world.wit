@@ -1,9 +1,9 @@
-package atomic-agents:runner@0.1.0;
+package atomic-agents:runner@0.2.0;
 
 /// Data shared by the runner's imports and its export. Each type mirrors one
-/// in `atomic_agents::guest` field for field, except `level`
-/// (`atomic_agent_runner::host::Level`) and `run-error` / `step-failure`
-/// (`atomic_agent_runner::interpreter::RunError`).
+/// in `atomic_agents::guest` field for field, except `level` and
+/// `call-origin` (`atomic_agent_runner::host::{Level, CallOrigin}`) and
+/// `run-error` / `step-failure` (`atomic_agent_runner::interpreter::RunError`).
 interface types {
   /// Who wrote a message. System text travels in `completion-request.system`.
   enum role {
@@ -112,6 +112,33 @@ interface types {
     limit-exceeded(string),
   }
 
+  /// Which kind of runner step made an `mcp.call`.
+  ///
+  /// The runner's own interpreter sets the origin from the kind of step
+  /// making the call. It is never taken from model output or from `args`.
+  ///
+  /// Hosts treat the origin as one check among several, not proof. For
+  /// example, a host refuses a write tool unless the origin is `act-step` and
+  /// an act step of the deployed spec names that tool. A host should also
+  /// apply its own argument checks, because act arguments can be rendered
+  /// from earlier model output. A `tool-step` call is not an act: apply
+  /// read-only policy to it.
+  ///
+  /// The origin is trusted only as far as the guest component is. A host
+  /// that loads a component it did not build (or whose digest it did not
+  /// pin) must treat the origin as unverified.
+  enum call-origin {
+    /// A tool call the model asked for in an `agent` step. Every call the
+    /// model makes that reaches the host has this origin, whatever tool it names and whatever its
+    /// arguments say.
+    model,
+    /// A `tool` step's own call.
+    tool-step,
+    /// An `act` step's own call. It means "some act step of this spec named
+    /// this tool": the enum carries no step id.
+    act-step,
+  }
+
   /// Severity of a log line.
   enum level {
     trace,
@@ -155,10 +182,15 @@ interface llm {
 
 /// The tools.
 interface mcp {
-  use types.{tool-info, tool-error};
+  use types.{tool-info, tool-error, call-origin};
 
   /// Calls `tool` with `args`, a JSON document, and returns its output.
-  call: func(tool: string, args: string) -> result<string, tool-error>;
+  ///
+  /// `origin` is the kind of step making the call. The runner's own
+  /// interpreter sets it; it is never taken from model output or from
+  /// `args`. Treat it as one check among several, not proof (see
+  /// `call-origin`).
+  call: func(tool: string, args: string, origin: call-origin) -> result<string, tool-error>;
 
   /// Lists the tools the model may be offered in this run: the guest offers
   /// it nothing else. List read tools only. A tool that changes something
